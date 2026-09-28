@@ -33,11 +33,11 @@ npm start
 | Required | What it is |
 |---|---|
 | `MONGO_URL` | MongoDB connection string (Railway Mongo works) |
-| `OPERATOR_SECRET` | Wallet that pays network fees for sweeps and payouts. Keep ~0.3 SOL in it. |
+| `OPERATOR_SECRET` | Wallet that pays network fees for sweeps and payouts. 0.02 SOL is enough to start: about 0.013 goes to the one-time lookup table, each sweep or payout costs about 0.000013. It also gets the 20% buyback share by default, so it refills itself as people trade. |
 | `VAULT_MASTER_KEY` | 64 hex chars. Encrypts every handle vault key. **Back it up. Lose it and the vaults are locked forever.** |
 | `TOKEN_CA` | The $IPO contract address (shown on the site with copy + buy buttons). Can stay empty until $IPO is live. |
 
-On first start the server creates a small address lookup table (costs the operator about 0.003 SOL) and saves it in the database.
+On first start the server creates a small address lookup table (about 0.013 SOL, a one-time deposit the table holds, not a fee) and saves it in the database.
 
 A listing costs the lister the listing fee plus about 0.021 SOL of pump.fun setup (rent, network fees, first buy). Measured on the local pump.fun copy: 0.0715 SOL total with the default 0.05 SOL fee.
 
@@ -46,7 +46,7 @@ A listing costs the lister the listing fee plus about 0.021 SOL of pump.fun setu
 | Setting | Default | Notes |
 |---|---|---|
 | `RPC_URL` | `https://api.mainnet-beta.solana.com` | **Use a paid RPC in production** (Helius, Triton, QuickNode). |
-| `PUBLIC_URL` | empty | Your site address, e.g. `https://ipo.fun`. Each coin's website link on pump.fun then points to its page here. |
+| `PUBLIC_URL` | `https://useipo.up.railway.app` | Site address. Each coin's website link on pump.fun points to its page here. |
 | `PORT` | `3000` | |
 | `DB_NAME` | `ipo` | |
 | `X_HANDLE` | `ipodotfun` | Footer link |
