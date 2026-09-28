@@ -15,7 +15,7 @@ export function loadConfig(overrides = {}) {
     vaultMasterKey: env('VAULT_MASTER_KEY'), // 64 hex chars, encrypts every handle vault key at rest
     tokenCa: env('TOKEN_CA', ''), // the $IPO contract address (empty = the site shows "launching soon")
     publicUrl: env('PUBLIC_URL', 'https://useipo.up.railway.app'), // site address, used for the website link on each coin
-    xHandle: env('X_HANDLE', 'ipodotfun'),
+    xHandle: env('X_HANDLE', 'ipoanyone'),
     // listing
     listingFeeSol: num('LISTING_FEE_SOL', 0.05), // paid to the treasury in the same transaction that creates the coin
     devBuySol: num('DEV_BUY_SOL', 0.00001), // tiny first buy right after the coin is created

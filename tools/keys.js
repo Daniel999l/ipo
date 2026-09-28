@@ -5,4 +5,4 @@ import { randomBytes } from 'crypto';
 const k = Keypair.generate();
 console.log(`OPERATOR_SECRET=${bs58.encode(k.secretKey)}`);
 console.log(`VAULT_MASTER_KEY=${randomBytes(32).toString('hex')}`);
-console.log(`\n# operator wallet address (send it ~0.3 SOL for network fees): ${k.publicKey.toBase58()}`);
+console.log(`\n# operator wallet address (send it 0.02 SOL to start): ${k.publicKey.toBase58()}`);

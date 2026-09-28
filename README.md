@@ -49,7 +49,7 @@ A listing costs the lister the listing fee plus about 0.021 SOL of pump.fun setu
 | `PUBLIC_URL` | `https://useipo.up.railway.app` | Site address. Each coin's website link on pump.fun points to its page here. |
 | `PORT` | `3000` | |
 | `DB_NAME` | `ipo` | |
-| `X_HANDLE` | `ipodotfun` | Footer link |
+| `X_HANDLE` | `ipoanyone` | Footer and "Follow on X" links |
 | `LISTING_FEE_SOL` | `0.05` | Paid to the treasury in the listing transaction |
 | `DEV_BUY_SOL` | `0.00001` | Tiny first buy after the coin is created |
 | `HANDLE_SHARE_BPS` | `8000` | Handle vault's share of creator fees (8000 = 80%). Only affects coins listed after a change. |

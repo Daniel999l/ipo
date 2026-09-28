@@ -110,7 +110,7 @@ if (process.argv[1]?.endsWith('launch-token.js')) {
       mint: readKey(mintFile), wallet: opt('wallet') ? readKey(opt('wallet')) : keyFromText(walletSecret),
       name: opt('name', 'IPO'), symbol: opt('symbol', 'IPO'),
       description: opt('description', 'Take any X account public.'),
-      image: opt('image', 'public/ipo-token.png'), twitter: opt('twitter', process.env.X_HANDLE ? `https://x.com/${process.env.X_HANDLE}` : undefined), telegram: opt('telegram'), website: opt('website', process.env.PUBLIC_URL),
+      image: opt('image', 'public/ipo-token.png'), twitter: opt('twitter', `https://x.com/${process.env.X_HANDLE || 'ipoanyone'}`), telegram: opt('telegram'), website: opt('website', process.env.PUBLIC_URL || 'https://useipo.up.railway.app'),
       uri: opt('uri'), devBuySol: Number(opt('dev-buy', '0.1')), send: has('yes'), lutAddress: opt('lut'),
       saveTo: process.env.MONGO_URL ? { mongoUrl: process.env.MONGO_URL, dbName: process.env.DB_NAME || 'ipo' } : null,
     });
