@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IPO | Take any account public</title>
+<meta name="description" content="Type any X handle. If nobody has listed it yet, you ring the bell. Every trade from then on counts toward that account.">
+<link rel="icon" href="/coin.png">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="top">
+  <div class="aura"><i class="a1"></i><i class="a2"></i><i class="a3"></i><div class="noise"></div></div>
+  <div class="wrap">
+    <div id="hdr"></div>
+    <div class="hero">
+      <div>
+        <span class="eyebrow"><b>OPEN</b><span id="eyebrow">Every X account can go public</span></span>
+        <h1>Take any<br>account <span class="gr">public.</span></h1>
+        <p class="sub">Type an X handle. If nobody has listed it yet, you ring the bell. <strong>Every trade from then on counts toward that account.</strong></p>
+        <form class="search" id="sf"><div class="in">
+          <span class="at">@</span><input id="si" placeholder="search any handle" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="40">
+          <button class="go" type="submit">IPO it <span id="arr"></span></button>
+        </div></form>
+        <div class="hint" id="trend"></div>
+        <div class="stats">
+          <div><b id="sListed">0</b><span>Accounts listed</span></div>
+          <div><b id="sToday">0</b><span>Listed today</span></div>
+          <div><b id="sEarned">0</b><span>Earned by accounts</span></div>
+        </div>
+      </div>
+      <div class="stage" id="stage">
+        <div class="orbit o2"></div><div class="orbit"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="tape" id="tapeWrap" hidden><div class="t" id="tape"></div></div>
+
+<div class="wrap">
+  <section>
+    <div class="sh">
+      <div><h2>Just went public</h2><p>The newest accounts to hit the market.</p></div>
+      <a class="btn" href="/markets?sort=new">See all</a>
+    </div>
+    <div class="grid4" id="fresh"></div>
+  </section>
+
+  <section>
+    <div class="sh">
+      <div><h2>Top accounts</h2><p id="boardSub">Ranked by market value.</p></div>
+      <div class="tabs" id="boardTabs"><button data-s="top" class="on">Value</button><button data-s="hot">Hot</button><button data-s="earned">Earned</button><button data-s="new">New</button></div>
+    </div>
+    <div class="board" id="board"></div>
+  </section>
+
+  <section id="how">
+    <div class="sh"><div><h2>Ring the bell in three steps</h2><p>Listing an account takes about ten seconds.</p></div></div>
+    <div class="steps">
+      <div class="step"><div class="k">01</div><h3>Search a handle</h3><p>Look up any X account. If it already trades here, you go straight to its market.</p></div>
+      <div class="step"><div class="k">02</div><h3>Take it public</h3><p>Connect your wallet and pay the small listing fee. The market opens instantly and you are the first name on it.</p></div>
+      <div class="step"><div class="k">03</div><h3>Trade the hype</h3><p>Buy early, sell high. <span id="sharePct">80%</span> of the creator fees from every trade are set aside for the account owner, ready to claim.</p></div>
+    </div>
+  </section>
+
+  <div id="tok"></div>
+  <div id="ftr"></div>
+</div>
+
+<script type="module">
+import { $, api, esc, usd, money, pct, subline, followers, ago, avatar, spark, isUp, header, footer, tokenBox, getConfig, ARROW } from '/assets/app.js';
+header(); footer();
+$('#arr').innerHTML = ARROW;
+$('#sf').addEventListener('submit', e => {
+  e.preventDefault();
+  const h = $('#si').value.trim().replace(/^https?:\/\/(www\.)?(x|twitter)\.com\//i, '').replace(/^@/, '').split(/[/?#]/)[0];
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(h)) { $('#si').focus(); $('.search').animate([{ transform: 'translateX(-6px)' }, { transform: 'translateX(6px)' }, { transform: 'none' }], { duration: 240 }); return; }
+  location.href = '/@' + h;
+});
+
+const card = (c, cls) => `<a class="card ${cls}" href="/@${esc(c.handle)}">`;
+function mainCard(c) {
+  const ch = pct(c.change24);
+  return `${card(c, 'main')}
+    <div class="row">${avatar(c.handle)}<div><div class="hn">@${esc(c.handle)}</div><div class="hs">${c.profile?.followers ? followers(c.profile.followers) + ' followers' : '#' + (c.rank || 1) + ' on IPO'}</div></div><span class="tag">LISTED ${esc(ago(c.createdAt).replace(' ago', '').toUpperCase())} AGO</span></div>
+    <div class="px"><b>${usd(c.mcapLamports)}</b><span class="${ch.c}">${ch.t}</span></div>
+    <div class="lbl">Market value</div>
+    <div class="chart">${spark(c.spark, { w: 360, h: 130, up: isUp(c), big: true })}</div>
+    <div class="kv"><div><span>24h volume</span><b>${money(c.vol24Usd || 0)}</b></div><div><span>To graduation</span><b>${Math.round((c.curveProgress || 0) * 100)}%</b></div><div><span>Earned</span><b>${usd(c.collectedLamports)}</b></div></div>
+    <div class="acts"><span class="b">Buy</span><span class="s">Sell</span></div></a>`;
+}
+function miniCard(c, cls, line) {
+  const ch = pct(c.change24);
+  return `${card(c, 'mini ' + cls)}<div class="row">${avatar(c.handle)}<div style="min-width:0"><div class="hn">@${esc(c.handle)}</div><div class="hs">Listed ${esc(ago(c.createdAt))}</div></div><span class="ch ${ch.c}">${ch.t}</span></div><p>${line}</p></a>`;
+}
+function emptyStage() {
+  return `<div class="card main" style="text-align:center;padding:40px 28px"><img src="/coin.png" alt="" style="width:84px;height:84px;border-radius:24px;box-shadow:0 20px 50px -20px rgba(31,224,138,.8)"><div class="hn" style="font-size:24px;margin-top:22px">The bell is waiting</div><p class="hs" style="font-size:15px;line-height:1.55;margin-top:10px">The first account to go public shows up right here. Search a handle to be first.</p></div>`;
+}
+
+async function load() {
+  const [stats, top, fresh, hot] = await Promise.all([api('/stats'), api('/coins?sort=top&limit=1'), api('/coins?sort=new&limit=12'), api('/coins?sort=hot&limit=4')]);
+  await getConfig().then(c => { $('#sharePct').textContent = c.handleSharePct + '%'; }).catch(() => {});
+  $('#sListed').textContent = stats.listed.toLocaleString('en-US');
+  $('#sToday').textContent = stats.listedToday.toLocaleString('en-US');
+  $('#sEarned').textContent = usd(stats.earnedLamports);
+  if (stats.listedToday) $('#eyebrow').textContent = `${stats.listedToday.toLocaleString('en-US')} ${stats.listedToday === 1 ? 'account' : 'accounts'} went public today`;
+  $('#trend').innerHTML = hot.coins.length ? 'Trending ' + hot.coins.map(c => `<a href="/@${esc(c.handle)}">@${esc(c.handle)}</a>`).join('') : '';
+
+  const stage = $('#stage');
+  const orbit = '<div class="orbit o2"></div><div class="orbit"></div>';
+  const t = top.coins[0];
+  if (!t) stage.innerHTML = orbit + emptyStage();
+  else {
+    const d = (await api('/coins/' + encodeURIComponent(t.mint)).catch(() => null))?.coin;
+    const others = fresh.coins.filter(c => c.mint !== t.mint);
+    stage.innerHTML = orbit + (others[0] ? miniCard(others[0], 'm1', `Market value <b>${usd(others[0].mcapLamports)}</b>`) : '') + mainCard({ ...t, rank: d?.rank || 1 }) + (others[1] ? miniCard(others[1], 'm2', `Earned so far <b>${usd(others[1].collectedLamports)}</b>`) : '');
+  }
+
+  if (fresh.coins.length) {
+    const items = fresh.coins.map(c => { const ch = pct(c.change24); return `<a class="it" href="/@${esc(c.handle)}">${avatar(c.handle)}@${esc(c.handle)} <em>went public</em> <span class="${ch.c}">${ch.t}</span></a>`; });
+    while (items.length < 8) items.push(...items);
+    const html = items.join('') + items.join('');
+    if ($('#tape').dataset.h !== html) { $('#tape').innerHTML = html; $('#tape').dataset.h = html; }
+    $('#tapeWrap').hidden = false;
+  }
+
+  $('#fresh').innerHTML = fresh.coins.length ? fresh.coins.slice(0, 4).map(c => {
+    const ch = pct(c.change24); const g = isUp(c);
+    return `<a class="ipo" href="/@${esc(c.handle)}"><div class="row">${avatar(c.handle)}<div class="hn">@${esc(c.handle)}</div><span class="when">${esc(ago(c.createdAt))}</span></div><div class="spark">${spark(c.spark, { up: g })}</div><div class="foot"><div><b>${usd(c.mcapLamports)}</b><span>Market value</span></div><span class="${ch.c}">${ch.t}</span></div></a>`;
+  }).join('') : `<div class="empty" style="grid-column:1/-1"><b>Nobody has rung the bell yet</b>Search any handle above and be the first account on the board.</div>`;
+  await board('top');
+}
+
+async function board(sort) {
+  const subs = { top: 'Ranked by market value.', hot: 'Most traded in the last 24 hours.', earned: 'Most fees earned for the account owner.', new: 'Newest first.' };
+  $('#boardSub').textContent = subs[sort];
+  const { coins } = await api(`/coins?sort=${sort}&limit=8`);
+  const head = '<div class="tr hd"><span>#</span><span>Account</span><span>Value</span><span>24h</span><span>Earned</span><span>Last 24h</span><span></span></div>';
+  $('#board').innerHTML = coins.length ? head + coins.map((c, i) => {
+    const ch = pct(c.change24);
+    return `<a class="tr" href="/@${esc(c.handle)}"><span class="n">${i + 1}</span><span class="who">${avatar(c.handle)}<div style="min-width:0"><b>@${esc(c.handle)}</b><small>${subline(c, 'Listed ' + esc(ago(c.createdAt)))}</small></div></span><span style="font-weight:600">${usd(c.mcapLamports)}</span><span class="${ch.c}" style="font-weight:600">${ch.t}</span><span style="color:var(--mute)">${usd(c.collectedLamports)}</span>${spark(c.spark, { up: isUp(c), h: 34 })}<span class="tb">Trade</span></a>`;
+  }).join('') : `<div class="empty" style="border:0"><b>The board is empty</b>The first account to go public takes the top spot.</div>`;
+}
+document.querySelectorAll('#boardTabs button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#boardTabs button').forEach(x => x.classList.toggle('on', x === b)); board(b.dataset.s);
+}));
+
+tokenBox($('#tok'));
+load().catch(e => console.error(e));
+setInterval(() => load().catch(() => {}), 30000);
+</script>
+</body>
+</html>

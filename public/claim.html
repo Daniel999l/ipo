@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Claim your fees | IPO</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="/coin.png">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="top">
+  <div class="aura soft"><i class="a1"></i><i class="a2"></i><i class="a3"></i><div class="noise"></div></div>
+  <div class="wrap">
+    <div id="hdr"></div>
+    <div class="formcard">
+      <div style="text-align:center"><span class="eyebrow"><b>OWNERS</b>Your account, your fees</span>
+      <h1 style="font-size:56px;margin:22px 0 14px">Claim your <span class="gr">fees.</span></h1>
+      <p class="sub" style="margin:0 auto">If someone took your X account public, a share of every trade has been saved for you. Prove it is you and we send it to your wallet.</p></div>
+      <div class="panel" style="margin-top:34px" id="box"></div>
+    </div>
+  </div>
+</div>
+<div class="wrap"><div id="ftr"></div></div>
+<script type="module">
+import { $, api, postJson, esc, usd, header, footer, getConfig, connectedWallet, copy, avatar } from '/assets/app.js';
+header('claim'); footer();
+const box = $('#box');
+let claim = null;
+
+function step1() {
+  const w = connectedWallet();
+  box.innerHTML = `<h3 style="font-size:20px;letter-spacing:-.02em">1. Your account and wallet</h3>
+    <div class="field"><label>Your X handle</label><input id="h" placeholder="@yourhandle" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(new URLSearchParams(location.search).get('h') ? '@' + new URLSearchParams(location.search).get('h') : '')}"></div>
+    <div id="acct"></div>
+    <div class="field"><label>Wallet to receive SOL</label><input id="w" placeholder="Solana wallet address" autocomplete="off" spellcheck="false" value="${esc(w?.publicKey || '')}"></div>
+    <button class="btn grn" id="next" style="width:100%;height:54px;margin-top:22px;font-size:16px">Continue</button><div class="err" id="err"></div>`;
+  const look = async () => {
+    const h = $('#h').value.trim().replace(/^@/, '');
+    if (!/^[A-Za-z0-9_]{1,15}$/.test(h)) { $('#acct').innerHTML = ''; return; }
+    try { const { coin } = await api('/coins/' + h); $('#acct').innerHTML = `<div class="row" style="margin-top:14px;padding:14px;border-radius:14px;background:rgba(31,224,138,.06);border:1px solid rgba(31,224,138,.2)">${avatar(coin.handle)}<div><div class="hn">${esc(coin.profile?.name || '@' + coin.handle)}</div><div class="hs">@${esc(coin.handle)} · ${usd(coin.vaultLamports)} ready to claim</div></div></div>`; }
+    catch { $('#acct').innerHTML = `<p class="note">@${esc(h)} is not public yet, so there is nothing to claim.</p>`; }
+  };
+  $('#h').addEventListener('change', look); $('#h').addEventListener('blur', look); look();
+  $('#next').addEventListener('click', async () => {
+    $('#err').textContent = '';
+    try { claim = await postJson('/claims', { handle: $('#h').value, wallet: $('#w').value.trim() }); step2(); }
+    catch (e) { $('#err').textContent = e.message; }
+  });
+}
+
+function step2() {
+  const intent = 'https://x.com/intent/post?text=' + encodeURIComponent(claim.post);
+  box.innerHTML = `<h3 style="font-size:20px;letter-spacing:-.02em">2. Post this from @${esc(claim.handle)}</h3>
+    <p class="note" style="font-size:14px">This shows us the account is yours. You can delete the post once you are paid.</p>
+    <div class="codebox">${esc(claim.post)}</div>
+    <div class="row2" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px"><a class="btn pri" href="${intent}" target="_blank" rel="noopener">Post on X</a><button class="btn" id="cp">Copy text</button></div>
+    <div class="field"><label>Link to your post</label><input id="u" placeholder="https://x.com/${esc(claim.handle)}/status/..." autocomplete="off" spellcheck="false"></div>
+    <button class="btn grn" id="send" style="width:100%;height:54px;margin-top:22px;font-size:16px">Send for review</button><div class="err" id="err"></div>`;
+  $('#cp').addEventListener('click', e => copy(claim.post, e.currentTarget));
+  $('#send').addEventListener('click', async () => {
+    $('#err').textContent = '';
+    try { await postJson(`/claims/${claim.claimId}/proof`, { url: $('#u').value }); step3(); }
+    catch (e) { $('#err').textContent = e.message; }
+  });
+}
+
+function step3() {
+  box.innerHTML = `<div class="done"><div class="ok"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg></div>
+    <h3 style="font-size:24px;letter-spacing:-.03em">You are in the queue</h3>
+    <p class="sub" style="margin:10px auto 0;font-size:16px">We check your post and send your SOL to the wallet you gave. Fees keep piling up after that, so you can claim again any time.</p>
+    <a class="btn" href="/@${esc(claim.handle)}" style="margin-top:24px">Back to @${esc(claim.handle)}</a></div>`;
+}
+getConfig().catch(() => {});
+step1();
+</script>
+</body>
+</html>

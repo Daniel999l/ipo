@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Markets | IPO</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="/coin.png">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="top">
+  <div class="aura soft"><i class="a1"></i><i class="a2"></i><i class="a3"></i><div class="noise"></div></div>
+  <div class="wrap">
+    <div id="hdr"></div>
+    <section style="padding-top:40px">
+      <div class="sh">
+        <div><h2>Every public account</h2><p id="sub">Search, sort and trade.</p></div>
+        <div class="tabs" id="tabs"><button data-s="top">Value</button><button data-s="hot">Hot</button><button data-s="earned">Earned</button><button data-s="new">New</button></div>
+      </div>
+      <form class="search" id="sf" style="margin:0 0 26px;max-width:none"><div class="in"><span class="at">@</span><input id="si" placeholder="find an account" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="40"><button class="go" type="submit">Search</button></div></form>
+      <div class="board" id="board"></div>
+    </section>
+  </div>
+</div>
+<div class="wrap"><div id="tok"></div><div id="ftr"></div></div>
+<script type="module">
+import { $, api, esc, usd, pct, subline, ago, avatar, spark, isUp, header, footer, tokenBox } from '/assets/app.js';
+const params = new URLSearchParams(location.search);
+let sort = ['top', 'hot', 'earned', 'new'].includes(params.get('sort')) ? params.get('sort') : 'top';
+header(sort === 'new' ? 'new' : 'markets'); footer(); tokenBox($('#tok'));
+$('#si').value = params.get('q') || '';
+async function load() {
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.s === sort));
+  const q = $('#si').value.trim().replace(/^@/, '');
+  const { coins } = await api(`/coins?sort=${sort}&limit=60&q=${encodeURIComponent(q)}`);
+  const head = '<div class="tr hd"><span>#</span><span>Account</span><span>Value</span><span>24h</span><span>Earned</span><span>Last 24h</span><span></span></div>';
+  if (!coins.length) {
+    const h = q.replace(/[^A-Za-z0-9_]/g, '').slice(0, 15);
+    $('#board').innerHTML = `<div class="empty" style="border:0"><b>${q ? 'No public account matches @' + esc(q) : 'The board is empty'}</b>${h ? `It is not public yet. <a href="/@${esc(h)}" style="color:var(--g);font-weight:600">Take @${esc(h)} public</a>` : 'The first account to go public takes the top spot.'}</div>`;
+    return;
+  }
+  $('#board').innerHTML = head + coins.map((c, i) => {
+    const ch = pct(c.change24);
+    return `<a class="tr" href="/@${esc(c.handle)}"><span class="n">${i + 1}</span><span class="who">${avatar(c.handle)}<div style="min-width:0"><b>@${esc(c.handle)}</b><small>${subline(c, 'Listed ' + esc(ago(c.createdAt)))}</small></div></span><span style="font-weight:600">${usd(c.mcapLamports)}</span><span class="${ch.c}" style="font-weight:600">${ch.t}</span><span style="color:var(--mute)">${usd(c.collectedLamports)}</span>${spark(c.spark, { up: isUp(c), h: 34 })}<span class="tb">Trade</span></a>`;
+  }).join('');
+}
+document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => { sort = b.dataset.s; history.replaceState(null, '', '/markets?sort=' + sort); load(); }));
+$('#sf').addEventListener('submit', e => { e.preventDefault(); load(); });
+let t; $('#si').addEventListener('input', () => { clearTimeout(t); t = setTimeout(load, 250); });
+load(); setInterval(() => { if (document.activeElement !== $('#si')) load().catch(() => {}); }, 30000);
+</script>
+</body>
+</html>
