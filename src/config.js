@@ -13,7 +13,7 @@ export function loadConfig(overrides = {}) {
     dbName: env('DB_NAME', 'ipo'),
     operatorSecret: env('OPERATOR_SECRET'), // base58 secret key of the wallet that pays network fees for sweeps and payouts
     vaultMasterKey: env('VAULT_MASTER_KEY'), // 64 hex chars, encrypts every handle vault key at rest
-    tokenCa: env('TOKEN_CA', ''), // the $IPO contract address (empty = the site shows "launching soon")
+    tokenCa: env('TOKEN_CA', 'FXihEHahkX2atHPKbNaGhgCQq7bmfdV7V5grozt3pump'), // the $IPO contract address
     publicUrl: env('PUBLIC_URL', 'https://useipo.up.railway.app'), // site address, used for the website link on each coin
     xHandle: env('X_HANDLE', 'ipoanyone'),
     // listing

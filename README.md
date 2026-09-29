@@ -35,7 +35,7 @@ npm start
 | `MONGO_URL` | MongoDB connection string (Railway Mongo works) |
 | `OPERATOR_SECRET` | Wallet that pays network fees for sweeps and payouts. 0.02 SOL is enough to start: about 0.013 goes to the one-time lookup table, each sweep or payout costs about 0.000013. It also gets the 20% buyback share by default, so it refills itself as people trade. |
 | `VAULT_MASTER_KEY` | 64 hex chars. Encrypts every handle vault key. **Back it up. Lose it and the vaults are locked forever.** |
-| `TOKEN_CA` | The $IPO contract address (shown on the site with copy + buy buttons). Can stay empty until $IPO is live. |
+| `TOKEN_CA` | The $IPO contract address. Defaults to `FXihEHahkX2atHPKbNaGhgCQq7bmfdV7V5grozt3pump`, so it can stay empty. |
 
 On first start the server creates a small address lookup table (about 0.013 SOL, a one-time deposit the table holds, not a fee) and saves it in the database.
 
