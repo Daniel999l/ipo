@@ -1,41 +1,50 @@
-// Buy and sell for the user's own wallet. We only build the transaction; the user's wallet signs and sends it.
-import { PublicKey } from '@solana/web3.js';
-import { getAssociatedTokenAddressSync } from '@solana/spl-token';
-import { buyIxs, sellIxs, ammBuyIxs, ammSellIxs, curveState, TOKEN_2022_PROGRAM_ID } from './pump.js';
-import { buildV0, budgetIxs } from './tx.js';
-import { LaunchError } from './launch.js';
+// Buy and sell on the Pons curve from the user's own wallet. We only build the transaction; the wallet signs and sends it.
+// After a coin graduates, trading moves to its pool and the site sends people to the Pons page instead.
+import { ethers } from 'ethers';
+import { IFACE } from './chain.js';
+import { UserError } from './pons.js';
 
-export async function tokenBalance(conn, mint, owner) {
-  try {
-    const ata = getAssociatedTokenAddressSync(new PublicKey(mint), new PublicKey(owner), false, TOKEN_2022_PROGRAM_ID);
-    return BigInt((await conn.getTokenAccountBalance(ata, 'confirmed')).value.amount);
-  } catch { return 0n; }
+export async function tokenBalance(ctx, token, owner) {
+  try { return await ctx.chain.erc20(token).balanceOf(owner); } catch { return 0n; }
 }
 
-export async function prepareTrade(ctx, { mint, wallet, side, sol, percent, slippage = 10 }) {
-  const { conn, cfg, db, lut } = ctx;
-  let user;
-  try { user = new PublicKey(wallet); } catch { throw new LaunchError('Connect a wallet first.'); }
-  const coin = await db.coins.findOne({ mint: String(mint) }, { projection: { mint: 1 } });
-  if (!coin) throw new LaunchError('Market not found.', 404);
-  const slip = Math.min(50, Math.max(1, Number(slippage) || 10));
-  const cs = await curveState(conn, coin.mint);
-  if (!cs) throw new LaunchError('Market not found.', 404);
-  let ixs;
+export async function prepareTrade(ctx, { token, wallet, side, eth, percent, slippage = 10 }) {
+  const { chain, cfg, db } = ctx;
+  if (!ethers.isAddress(wallet)) throw new UserError('Connect a wallet first.');
+  const coin = await db.coins.findOne({ token: ethers.isAddress(token) ? ethers.getAddress(token) : String(token) });
+  if (!coin) throw new UserError('Market not found.', 404);
+  const cv = chain.curveAt(coin.curve);
+  if (await cv.graduated().catch(() => false)) throw Object.assign(new UserError('This account graduated. Trade it on Pons.', 409), { graduated: true, url: cfg.ponsTokenPage + coin.token });
+  const slip = BigInt(Math.round(Math.min(50, Math.max(1, Number(slippage) || 10)) * 100));
+  const from = ethers.getAddress(wallet);
+
   if (side === 'buy') {
-    const s = Number(sol);
-    if (!(s > 0) || s > cfg.maxTradeSol) throw new LaunchError(`Enter an amount between 0 and ${cfg.maxTradeSol} SOL.`);
-    const lamports = BigInt(Math.round(s * 1e9));
-    ixs = cs.complete ? await ammBuyIxs(conn, { mint: coin.mint, user, solLamports: lamports, slippage: slip }) : await buyIxs(conn, { mint: coin.mint, user, solLamports: lamports, slippage: slip });
-  } else if (side === 'sell') {
+    const v = Number(eth);
+    if (!(v > 0) || v > cfg.maxTradeEth) throw new UserError(`Enter an amount between 0 and ${cfg.maxTradeEth} ETH.`);
+    const value = ethers.parseEther(String(v));
+    let out;
+    try { out = await cv.buy.staticCall(value, 0, from, { value, from }); }
+    catch (e) { throw new UserError(/insufficient funds/i.test(e.message) ? 'Not enough ETH in your wallet.' : 'The market would not take this buy right now. Try a different amount.'); }
+    const min = out * (10000n - slip) / 10000n;
+    return { tx: { to: coin.curve, data: IFACE.curve.encodeFunctionData('buy', [value, min, from]), value: '0x' + value.toString(16) }, expectTokens: out.toString() };
+  }
+  if (side === 'sell') {
     const p = Number(percent);
-    if (!(p > 0 && p <= 100)) throw new LaunchError('Choose how much to sell.');
-    const bal = await tokenBalance(conn, coin.mint, user);
-    if (bal === 0n) throw new LaunchError('You do not hold any of this yet.');
+    if (!(p > 0 && p <= 100)) throw new UserError('Choose how much to sell.');
+    const t = chain.erc20(coin.token);
+    const bal = await t.balanceOf(from);
+    if (bal === 0n) throw new UserError('You do not hold any of this yet.');
     const amount = p >= 100 ? bal : bal * BigInt(Math.round(p * 100)) / 10000n;
-    if (amount === 0n) throw new LaunchError('Amount too small.');
-    ixs = cs.complete ? await ammSellIxs(conn, { mint: coin.mint, user, tokenAmount: amount, slippage: slip }) : await sellIxs(conn, { mint: coin.mint, user, tokenAmount: amount, slippage: slip });
-  } else throw new LaunchError('Choose buy or sell.');
-  const { tx } = await buildV0(conn, { payer: user, ixs: [...budgetIxs({ units: 300000, microLamports: cfg.priorityMicroLamports }), ...ixs], luts: lut ? [lut] : [] });
-  return { tx: Buffer.from(tx.serialize()).toString('base64') };
+    if (amount === 0n) throw new UserError('Amount too small.');
+    // the curve takes the tokens itself, so it needs permission once
+    if ((await t.allowance(from, coin.curve)) < amount) {
+      return { approve: { to: coin.token, data: IFACE.erc20.encodeFunctionData('approve', [coin.curve, ethers.MaxUint256]), value: '0x0' } };
+    }
+    let out;
+    try { out = await cv.sell.staticCall(amount, 0, from, { from }); }
+    catch { throw new UserError('The market would not take this sell right now. Try a smaller amount.'); }
+    const min = out * (10000n - slip) / 10000n;
+    return { tx: { to: coin.curve, data: IFACE.curve.encodeFunctionData('sell', [amount, min, from]), value: '0x0' }, expectEth: ethers.formatEther(out) };
+  }
+  throw new UserError('Choose buy or sell.');
 }

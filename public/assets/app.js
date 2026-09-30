@@ -11,21 +11,23 @@ export async function api(path, opts) {
 export const postJson = (path, body) => api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
 let cfgP = null;
-export const getConfig = () => (cfgP ||= api('/config').then(c => { solUsd = c.solUsd || null; return c; }));
+export const getConfig = () => (cfgP ||= api('/config').then(c => { ethUsd = c.ethUsd || null; return c; }));
 
 // ---------- formatting
-let solUsd = null;
-export function usd(lamports) {
-  const s = (Number(lamports) || 0) / 1e9;
-  if (!s) return solUsd ? '$0' : '0 SOL';
-  const v = solUsd ? s * solUsd : s;
-  const unit = solUsd ? '' : ' SOL';
-  const pre = solUsd ? '$' : '';
-  const f = v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e4 ? (v / 1e3).toFixed(1) + 'K' : v >= 1000 ? Math.round(v).toLocaleString('en-US') : v >= 1 ? v.toFixed(2) : v.toFixed(v >= 0.01 ? 3 : 4);
-  return pre + f + unit;
+let ethUsd = null;
+// dollars: $12.4K, $3.21, $0.0042
+export function money(v) {
+  v = Number(v) || 0;
+  if (!v) return '$0';
+  const f = v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e4 ? (v / 1e3).toFixed(1) + 'K' : v >= 1000 ? Math.round(v).toLocaleString('en-US') : v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(3) : v.toFixed(Math.min(12, Math.ceil(-Math.log10(v)) + 2));
+  return '$' + f;
 }
-export function sol(lamports, d = 3) { const s = (Number(lamports) || 0) / 1e9; return (s >= 100 ? Math.round(s).toLocaleString('en-US') : s.toFixed(s > 0 && s < 0.001 ? 5 : d)) + ' SOL'; }
-export function money(v) { const f = v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v.toFixed(0); return '$' + f; }
+// an ETH amount shown in dollars (or ETH if the price is unknown)
+export function usd(eth) {
+  eth = Number(eth) || 0;
+  return ethUsd ? money(eth * ethUsd) : ethAmt(eth);
+}
+export function ethAmt(eth, d = 4) { eth = Number(eth) || 0; return (eth >= 100 ? Math.round(eth).toLocaleString('en-US') : eth.toFixed(eth > 0 && eth < 0.0001 ? 6 : d).replace(/\.?0+$/, '') || '0') + ' ETH'; }
 export function pct(x) {
   if (x == null || !isFinite(x)) return { t: '0%', c: 'up' };
   const p = x * 100; const a = Math.abs(p);
@@ -40,7 +42,7 @@ export function followers(n) { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).t
 export const CHECK = '<svg class="vf" viewBox="0 0 24 24" aria-label="Verified"><path fill="#1FE08A" d="M22.5 12.5c0-1.58-.88-2.95-2.18-3.65.15-.44.23-.91.23-1.4 0-2.21-1.71-3.98-3.82-3.98-.47 0-.92.08-1.34.25C14.77 2.39 13.44 1.5 11.9 1.5c-1.54 0-2.87.89-3.49 2.2-.42-.16-.87-.25-1.34-.25-2.11 0-3.82 1.77-3.82 3.98 0 .49.08.96.23 1.4C2.18 9.55 1.3 10.92 1.3 12.5c0 1.5.8 2.8 1.97 3.52-.02.16-.03.32-.03.48 0 2.21 1.71 3.98 3.82 3.98.47 0 .92-.09 1.34-.25.62 1.31 1.95 2.2 3.49 2.2 1.54 0 2.87-.89 3.49-2.2.42.16.87.25 1.34.25 2.11 0 3.82-1.77 3.82-3.98 0-.16-.01-.32-.03-.48 1.17-.72 1.97-2.02 1.97-3.52z"/><path fill="#04130A" d="M10.54 16.2 6.8 12.46l1.41-1.41 2.33 2.33 5.25-5.25 1.41 1.41z"/></svg>';
 // small line under a handle: real name and followers when we know them
 export function subline(c, fallback) { const p = c.profile; if (!p) return fallback; return esc(p.name || '') + (p.followers ? ` <span style="opacity:.7">${followers(p.followers)} followers</span>` : ''); }
-export const short = a => a ? a.slice(0, 4) + '...' + a.slice(-4) : '';
+export const short = a => a ? a.slice(0, 6) + '...' + a.slice(-4) : '';
 
 // ---------- avatars (profile picture, or initials on a color picked from the handle)
 const GR = [['#D9FF4A', '#1FE08A'], ['#6FE7FF', '#2E7BFF'], ['#FFB86B', '#FF5C7A'], ['#C69BFF', '#6A5BFF'], ['#7CFFCB', '#12B886'], ['#FFE27A', '#FF9F43'], ['#FF8FD8', '#B24BF3'], ['#9BE7FF', '#3FC1C9']];
@@ -63,21 +65,51 @@ export function spark(values, { w = 200, h = 54, up = true, big = false, id = Ma
 }
 export const isUp = c => c.change24 == null || c.change24 >= 0;
 
-// ---------- wallet: Phantom, Solflare, Backpack or any injected Solana wallet
-export function walletProvider() { return window.phantom?.solana || window.solflare || window.backpack?.solana || window.solana || null; }
+// ---------- wallet: MetaMask, Rabby, Coinbase Wallet or any browser wallet, on Robinhood Chain
+const CHAIN = { chainId: '0x1237', chainName: 'Robinhood Chain', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: ['https://rpc.mainnet.chain.robinhood.com'], blockExplorerUrls: ['https://robinhoodchain.blockscout.com'] };
+let current = null;
+export function walletProvider() { return window.ethereum || null; }
+function setBtn(a) { const b = document.getElementById('walletBtn'); if (b) b.textContent = a ? short(a) : 'Connect wallet'; }
+async function onRobinhood(p) {
+  const id = await p.request({ method: 'eth_chainId' });
+  if (String(id).toLowerCase() === CHAIN.chainId) return;
+  try { await p.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: CHAIN.chainId }] }); }
+  catch (e) {
+    if (e.code === 4902 || /unrecognized|not added|unknown chain/i.test(e.message)) await p.request({ method: 'wallet_addEthereumChain', params: [CHAIN] });
+    else throw e;
+  }
+}
 export async function connectWallet() {
   const p = walletProvider();
-  if (!p) throw new Error('Install a Solana wallet like Phantom to continue.');
-  const r = await p.connect();
-  const pk = r?.publicKey || p.publicKey;
-  if (!pk) throw new Error('Wallet did not connect.');
-  const w = { provider: p, publicKey: pk.toString() };
-  const b = document.getElementById('walletBtn'); if (b) b.textContent = short(w.publicKey);
-  return w;
+  if (!p) throw new Error('Install a wallet like MetaMask or Rabby to continue.');
+  const [a] = await p.request({ method: 'eth_requestAccounts' });
+  if (!a) throw new Error('Wallet did not connect.');
+  await onRobinhood(p);
+  current = { provider: p, address: a };
+  setBtn(a);
+  return current;
 }
-export function connectedWallet() { const p = walletProvider(); return p?.publicKey ? { provider: p, publicKey: p.publicKey.toString() } : null; }
-export function txFrom(b64) { return window.solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(b64), c => c.charCodeAt(0))); }
-export function txTo(tx) { let s = ''; for (const b of tx.serialize()) s += String.fromCharCode(b); return btoa(s); }
+export function connectedWallet() { return current; }
+// fills in the wallet if the site was already allowed before (no popup)
+export async function restoreWallet() {
+  const p = walletProvider(); if (!p) return null;
+  try { const [a] = await p.request({ method: 'eth_accounts' }); if (a) { current = { provider: p, address: a }; setBtn(a); } } catch {}
+  return current;
+}
+// send a transaction the server built, then wait until it is in a block
+export async function sendTx(w, t) {
+  await onRobinhood(w.provider);
+  const hash = await w.provider.request({ method: 'eth_sendTransaction', params: [{ from: w.address, to: t.to, data: t.data, value: t.value }] });
+  for (let i = 0; i < 180; i++) {
+    const rc = await w.provider.request({ method: 'eth_getTransactionReceipt', params: [hash] }).catch(() => null);
+    if (rc) { if (rc.status === '0x1' || rc.status === 1) return hash; throw new Error('The transaction failed on chain. Nothing was taken except gas.'); }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return hash;
+}
+export const cancelled = e => e?.code === 4001 || /reject|denied|cancel/i.test(e?.message || '');
+export const txLink = (cfg, hash) => `${cfg.explorer}/tx/${hash}`;
+if (window.ethereum?.on) window.ethereum.on('accountsChanged', a => { current = a?.[0] ? { provider: window.ethereum, address: a[0] } : null; setBtn(current?.address); });
 
 // ---------- ui bits
 export function toast(html, ms = 2600) {
@@ -105,7 +137,7 @@ export function header(active = '') {
   </nav>`;
   const wb = el.querySelector('#walletBtn');
   wb.addEventListener('click', async () => { try { await connectWallet(); } catch (e) { toast(esc(e.message)); } });
-  const w = connectedWallet(); if (w) wb.textContent = short(w.publicKey);
+  restoreWallet();
   getConfig().then(c => { const b = el.querySelector('#buyIpo'); if (c.buyUrl) b.href = c.buyUrl; else { b.removeAttribute('target'); b.href = '/#token'; } }).catch(() => {});
 }
 
@@ -118,7 +150,7 @@ export function footer() {
 export async function tokenBox(el) {
   const c = await getConfig();
   const inner = c.tokenCa
-    ? `<span class="lbl">Contract address</span><code><span>${esc(c.tokenCa)}</span><button id="caCopy">Copy</button></code><div class="row2"><a class="btn pri" href="${esc(c.buyUrl)}" target="_blank" rel="noopener">Buy $IPO</a><a class="btn" href="https://dexscreener.com/solana/${esc(c.tokenCa)}" target="_blank" rel="noopener">View chart</a></div>`
+    ? `<span class="lbl">Contract address</span><code><span>${esc(c.tokenCa)}</span><button id="caCopy">Copy</button></code><div class="row2"><a class="btn pri" href="${esc(c.buyUrl)}" target="_blank" rel="noopener">Buy $IPO</a><a class="btn" href="${esc(c.explorer)}/token/${esc(c.tokenCa)}" target="_blank" rel="noopener">View on explorer</a></div>`
     : `<span class="lbl">Contract address</span><code><span style="color:var(--mute)">Launching soon</span></code><div class="row2"><a class="btn" href="https://x.com/${esc(c.xHandle)}" target="_blank" rel="noopener">Follow on X</a></div>`;
   el.innerHTML = `<div class="token" id="token"><div class="in">
     <div><span class="eyebrow"><b>$IPO</b>The token behind every listing</span><h2 style="margin-top:22px">One token.<br>Every account.</h2><p>Every account that goes public on IPO feeds $IPO. The more accounts list and trade, the more the whole market grows.</p></div>

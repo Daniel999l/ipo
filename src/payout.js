@@ -1,48 +1,47 @@
-// Sends a handle's collected fees from its vault to the owner's wallet. Run by you, by hand, after checking a claim
-// (see tools/payout.js). The signature is saved BEFORE sending, so running it twice can never pay twice.
-import { PublicKey, SystemProgram } from '@solana/web3.js';
-import bs58 from 'bs58';
-import { decryptKeypair } from './crypto.js';
-import { buildV0, budgetIxs, confirmSig } from './tx.js';
-import { sweepCoin } from './collector.js';
+// Pays an account owner what their vault holds for them (owedWei). Run by you, by hand, after checking a claim
+// (tools/payout.js). The transaction is saved before it is sent, so running it twice never pays twice.
+import { ethers } from 'ethers';
+import { parseHandle } from './handles.js';
+import { collectCoin, addWei } from './collector.js';
 
-export async function payHandle(ctx, { key, wallet, claimId = null, log = () => {} }) {
-  const { conn, cfg, db } = ctx;
+export async function payHandle(ctx, { handle, wallet, claimId = null, log = () => {} }) {
+  const { chain, db } = ctx;
+  const { key } = parseHandle(handle);
   const coin = await db.coins.findOne({ key });
   if (!coin) throw new Error('No listed account @' + key);
-  const to = new PublicKey(wallet);
+  if (!ethers.isAddress(wallet)) throw new Error('That wallet address does not look right: ' + wallet);
+  const to = ethers.getAddress(wallet);
 
   // an earlier payout still in flight? settle it first
   const open = await db.payouts.findOne({ key, status: 'sending' });
   if (open) {
-    const st = (await conn.getSignatureStatus(open.signature, { searchTransactionHistory: true })).value;
-    if (st && !st.err) { await markPaid(db, open); throw new Error(`An earlier payout already landed (${open.signature}). Run again to pay anything new.`); }
-    if (!st && (await conn.getBlockHeight('confirmed')) <= open.lastValidBlockHeight) throw new Error('An earlier payout is still confirming. Wait a minute and run again.');
+    const rc = await chain.provider.getTransactionReceipt(open._id);
+    if (rc?.status === 1) { await markPaid(db, coin, open); throw new Error(`An earlier payout already landed (${open._id}). Run again to pay anything new.`); }
+    if (!rc && (await chain.provider.getTransactionCount(coin.vault, 'latest')) <= open.nonce) throw new Error('An earlier payout is still confirming. Wait a minute and run again.');
     await db.payouts.updateOne({ _id: open._id }, { $set: { status: 'failed' } });
   }
 
-  await sweepCoin(ctx, coin, { force: true }); // move any waiting fees in first
-  const bal = await conn.getBalance(new PublicKey(coin.vault), 'confirmed');
-  const amount = bal - cfg.vaultReserveLamports;
-  if (amount <= 0) throw new Error(`@${coin.handle} has nothing to pay out yet.`);
-
-  const vault = decryptKeypair(coin.vaultKey, cfg.vaultMasterKey);
-  const ixs = [...budgetIxs({ units: 20000, microLamports: cfg.priorityMicroLamports }), SystemProgram.transfer({ fromPubkey: vault.publicKey, toPubkey: to, lamports: amount })];
-  const { tx, blockhash } = await buildV0(conn, { payer: cfg.operator.publicKey, ixs });
-  tx.sign([cfg.operator, vault]);
-  const signature = bs58.encode(tx.signatures[0]);
-  const doc = { key, handle: coin.handle, mint: coin.mint, wallet: to.toBase58(), lamports: amount, signature, claimId, status: 'sending', lastValidBlockHeight: blockhash.lastValidBlockHeight, createdAt: new Date() };
-  const { insertedId } = await db.payouts.insertOne(doc);
-  const raw = tx.serialize();
-  await conn.sendRawTransaction(raw, { maxRetries: 3, preflightCommitment: 'confirmed' });
-  await confirmSig(conn, signature, { lastValidBlockHeight: blockhash.lastValidBlockHeight, raw });
-  await markPaid(db, { ...doc, _id: insertedId });
-  log(`Paid ${(amount / 1e9).toFixed(6)} SOL to ${to.toBase58()} for @${coin.handle}\nhttps://solscan.io/tx/${signature}`);
-  return { signature, lamports: amount };
+  await collectCoin(ctx, coin, { force: true }); // claim anything waiting first
+  const fresh = await db.coins.findOne({ key });
+  const owed = BigInt(fresh.owedWei || '0');
+  if (owed <= 0n) throw new Error(`@${coin.handle} has nothing to pay out yet.`);
+  const vault = chain.vaultWallet(coin.vaultIndex);
+  let doc;
+  const rc = await chain.vaultCall(vault, { to, value: owed }, {
+    onSigned: async ({ hash, raw }) => {
+      doc = { _id: hash, key, handle: coin.handle, token: coin.token, wallet: to, wei: owed.toString(), claimId, status: 'sending', nonce: ethers.Transaction.from(raw).nonce, createdAt: new Date() };
+      await db.payouts.insertOne(doc);
+    },
+  });
+  await markPaid(db, coin, doc);
+  log(`Paid ${ethers.formatEther(owed)} ETH to ${to} for @${coin.handle}\n${ctx.cfg.explorer}/tx/${rc.hash}`);
+  return { hash: rc.hash, wei: owed };
 }
 
-async function markPaid(db, p) {
-  await db.payouts.updateOne({ _id: p._id }, { $set: { status: 'paid', paidAt: new Date() } });
-  await db.coins.updateOne({ key: p.key }, { $inc: { paidLamports: p.lamports }, $set: { ownerWallet: p.wallet } });
-  if (p.claimId) await db.claims.updateOne({ _id: p.claimId }, { $set: { status: 'paid', signature: p.signature } });
+async function markPaid(db, coin, p) {
+  const upd = await db.payouts.updateOne({ _id: p._id, status: { $ne: 'paid' } }, { $set: { status: 'paid', paidAt: new Date() } });
+  if (!upd.modifiedCount) return;
+  await addWei(db, coin.token, { owedWei: -BigInt(p.wei), paidWei: BigInt(p.wei) });
+  await db.coins.updateOne({ token: coin.token }, { $set: { ownerWallet: p.wallet } });
+  if (p.claimId) await db.claims.updateOne({ _id: p.claimId }, { $set: { status: 'paid', signature: p._id } });
 }

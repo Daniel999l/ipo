@@ -1,100 +1,108 @@
-// Moves each coin's creator fees into its handle vault and keeps market stats and chart points fresh.
-import { PublicKey } from '@solana/web3.js';
-import { getAssociatedTokenAddressSync, NATIVE_MINT } from '@solana/spl-token';
-import { distributeInstructions, pendingFees, curveState, canonicalPumpPoolPda, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from './pump.js';
-import { sendIxs } from './tx.js';
+// Fees: each handle's vault sweeps its curve's creator tax into the Pons fee escrow, claims it, and sends the
+// buyback share on. The rest stays in the vault, owed to the account owner (tools/payout.js pays it).
+// Markets: market value, 24h volume and change, graduation progress, and one chart point per refresh.
+import { ethers } from 'ethers';
+import { IFACE } from './chain.js';
+import { ponsMarkets } from './pons.js';
 
-const SUPPLY_TOKENS = 1_000_000_000;
-const DUST = 10_000n; // below this a sweep costs more in network fees than it moves
+const big = v => BigInt(v || '0');
 
-export async function sweepCoin(ctx, coin, { force = false } = {}) {
-  const { conn, cfg, db, log } = ctx;
-  let pending = 0n;
-  try { pending = await pendingFees(conn, coin.mint); } catch (e) { log?.warn?.('pending fees read failed', coin.mint, e.message); }
-  let swept = 0n, sig = null;
-  if (pending >= DUST && (force || pending >= BigInt(cfg.minCollectLamports))) {
-    const before = BigInt(await conn.getBalance(new PublicKey(coin.vault), 'confirmed'));
-    try {
-      const d = await distributeInstructions(conn, coin.mint, cfg.operator.publicKey);
-      sig = await sendIxs(conn, { payer: cfg.operator, ixs: d.instructions, signers: [], units: 400000, microLamports: cfg.priorityMicroLamports });
-      const after = BigInt(await conn.getBalance(new PublicKey(coin.vault), 'confirmed'));
-      swept = after - before;
-      await db.collections.insertOne({ mint: coin.mint, key: coin.key, lamports: swept.toString(), signature: sig, graduated: d.isGraduated, at: new Date() });
-      if (swept > 0n) await db.coins.updateOne({ mint: coin.mint }, { $inc: { collectedLamports: Number(swept) } });
-    } catch (e) { log?.warn?.('sweep failed', coin.mint, e.message); }
+// add to a wei counter stored as a string, safely even if two processes touch the same coin
+export async function addWei(db, token, fields) {
+  for (let i = 0; i < 20; i++) {
+    const c = await db.coins.findOne({ token });
+    const filter = { token }, set = {};
+    for (const [f, d] of Object.entries(fields)) {
+      filter[f] = c[f]; set[f] = (big(c[f]) + BigInt(d)).toString();
+      set[f.replace(/Wei$/, 'Eth')] = Number(ethers.formatEther(set[f])); // number copy for sorting and display
+    }
+    if ((await db.coins.updateOne(filter, { $set: set })).modifiedCount) return;
   }
-  return { pending, swept, sig };
+  throw new Error('could not update counters for ' + token);
 }
 
-export async function sweepAll(ctx, opts = {}) {
-  const coins = await ctx.db.coins.find({ status: 'live' }).toArray();
-  const out = [];
-  for (const c of coins) out.push({ mint: c.mint, ...(await sweepCoin(ctx, c, opts)) });
+export async function collectCoin(ctx, coin, { force = false } = {}) {
+  const { chain, cfg, db, log } = ctx;
+  const vault = chain.vaultWallet(coin.vaultIndex);
+  const out = { token: coin.token, swept: false, claimedWei: 0n };
+  const min = force ? 1n : cfg.minSweepWei;
+
+  // 0. a claim or buyback that was sent right before a crash: count it now
+  for (const f of await db.fees.find({ token: coin.token, status: 'pending' }).toArray()) {
+    const rc = await chain.provider.getTransactionReceipt(f._id).catch(() => null);
+    if (!rc) {
+      if ((await chain.provider.getTransactionCount(vault.address, 'latest')) > f.nonce) await db.fees.updateOne({ _id: f._id }, { $set: { status: 'failed' } });
+      continue;
+    }
+    if (rc.status !== 1) { await db.fees.updateOne({ _id: f._id }, { $set: { status: 'failed' } }); continue; }
+    if ((await db.fees.updateOne({ _id: f._id, status: 'pending' }, { $set: { status: 'done' } })).modifiedCount) {
+      const w = BigInt(f.wei);
+      // after a recovered claim the buyback share simply stays in the vault, so the owner's share is what we add
+      if (f.kind === 'claim') await addWei(db, coin.token, { collectedWei: w, owedWei: w * BigInt(cfg.handleShareBps) / 10000n });
+      else if (f.kind === 'buyback') await addWei(db, coin.token, { buybackWei: w });
+    }
+  }
+
+  // 1. sweep the curve's creator tax into the escrow (only while on the curve; Pons also does this on its own)
+  try {
+    const cv = chain.curveAt(coin.curve);
+    const [graduated, pending] = await Promise.all([cv.graduated().catch(() => true), cv.creatorTaxBalance().catch(() => 0n)]);
+    if (!graduated && pending >= min) {
+      await chain.vaultCall(vault, { to: coin.curve, data: IFACE.curve.encodeFunctionData('sweepFees', [0]) });
+      out.swept = true;
+    }
+  } catch (e) { log?.warn?.('sweep skipped', coin.handle, e.shortMessage || e.message); }
+
+  // 2. claim what the escrow holds for this vault, 3. send the buyback share on
+  const held = await chain.escrow.balanceOf(vault.address);
+  if (held >= min && held > 0n) {
+    const buyback = held * BigInt(10000 - cfg.handleShareBps) / 10000n;
+    const owed = held - buyback;
+    const doc = { token: coin.token, key: coin.key, kind: 'claim', wei: held.toString(), at: new Date(), status: 'pending' };
+    const rc = await chain.vaultCall(vault, { to: cfg.ponsFeeEscrow, data: IFACE.escrow.encodeFunctionData('claim', [held]) }, { onSigned: async ({ hash, nonce }) => { doc._id = hash; doc.nonce = nonce; await db.fees.insertOne(doc); } });
+    if ((await db.fees.updateOne({ _id: rc.hash, status: 'pending' }, { $set: { status: 'done' } })).modifiedCount) await addWei(db, coin.token, { collectedWei: held, owedWei: owed });
+    out.claimedWei = held;
+    if (buyback > 0n) {
+      const to = cfg.buybackWallet || chain.house.address;
+      const bdoc = { token: coin.token, key: coin.key, kind: 'buyback', wei: buyback.toString(), to, at: new Date(), status: 'pending' };
+      try {
+        const brc = await chain.vaultCall(vault, { to, value: buyback }, { onSigned: async ({ hash, nonce }) => { bdoc._id = hash; bdoc.nonce = nonce; await db.fees.insertOne(bdoc); } });
+        if ((await db.fees.updateOne({ _id: brc.hash, status: 'pending' }, { $set: { status: 'done' } })).modifiedCount) await addWei(db, coin.token, { buybackWei: buyback });
+      } catch (e) { log?.warn?.('buyback transfer failed, it stays in the vault', coin.handle, e.shortMessage || e.message); }
+    }
+  }
   return out;
 }
 
-// market value, curve progress, vault balance, plus one chart point per refresh
-export async function refreshCoin(ctx, coin) {
-  const { conn, db, cfg } = ctx;
-  const set = { updatedAt: new Date() };
-  try {
-    const bal = await conn.getBalance(new PublicKey(coin.vault), 'confirmed');
-    set.vaultLamports = Math.max(0, bal - cfg.vaultReserveLamports);
-  } catch {}
-  try {
-    const cs = await curveState(conn, coin.mint);
-    if (cs) {
-      set.graduated = !!cs.complete;
-      if (!cs.complete) {
-        const price = Number(cs.virtualSol) / Number(cs.virtualToken); // lamports per raw unit
-        set.mcapLamports = Math.round(price * SUPPLY_TOKENS * 1e6);
-        set.curveProgress = Math.min(1, Number(cs.realSol) / 85e9);
-      } else {
-        const pool = canonicalPumpPoolPda(new PublicKey(coin.mint));
-        const baseAta = getAssociatedTokenAddressSync(new PublicKey(coin.mint), pool, true, TOKEN_2022_PROGRAM_ID);
-        const quoteAta = getAssociatedTokenAddressSync(NATIVE_MINT, pool, true, TOKEN_PROGRAM_ID);
-        const [b, q] = await Promise.all([conn.getTokenAccountBalance(baseAta), conn.getTokenAccountBalance(quoteAta)]);
-        const base = Number(b.value.amount), quote = Number(q.value.amount);
-        if (base > 0) set.mcapLamports = Math.round((quote / base) * SUPPLY_TOKENS * 1e6);
-        set.curveProgress = 1;
-      }
-    }
-  } catch (e) { ctx.log?.warn?.('market read failed', coin.mint, e.message); }
-  if (set.mcapLamports) {
-    await db.ticks.insertOne({ mint: coin.mint, t: new Date(ctx.now()), m: set.mcapLamports });
-    // 24h change from our own chart points (DexScreener replaces it when it has the coin)
-    const old = await db.ticks.find({ mint: coin.mint, t: { $lte: new Date(ctx.now() - 86400000) } }).sort({ t: -1 }).limit(1).next()
-      || await db.ticks.find({ mint: coin.mint }).sort({ t: 1 }).limit(1).next();
-    if (old?.m) set.change24 = set.mcapLamports / old.m - 1;
+export async function collectAll(ctx, opts = {}) {
+  const coins = await ctx.db.coins.find({ status: 'live' }).toArray();
+  const out = [];
+  for (const c of coins) {
+    try { out.push(await collectCoin(ctx, c, opts)); } catch (e) { ctx.log?.warn?.('collect failed', c.handle, e.shortMessage || e.message); }
   }
-  await db.coins.updateOne({ mint: coin.mint }, { $set: set });
-  return set;
+  return out;
 }
 
 export async function refreshAll(ctx) {
-  const coins = await ctx.db.coins.find({ status: 'live' }).toArray();
-  for (const c of coins) await refreshCoin(ctx, c);
-  await marketStats(ctx, coins).catch(e => ctx.log?.warn?.('market stats', e.message));
-}
-
-// 24h volume and trades from DexScreener, 30 coins per request
-export async function marketStats(ctx, coins) {
-  const { cfg, db } = ctx;
-  if (!cfg.marketUrl || !coins.length) return;
-  for (let i = 0; i < coins.length; i += 30) {
-    const chunk = coins.slice(i, i + 30).map(c => c.mint);
-    const r = await fetch(`${cfg.marketUrl}/${chunk.join(',')}`, { signal: AbortSignal.timeout(8000) });
-    if (!r.ok) continue;
-    const j = await r.json();
-    const best = new Map();
-    for (const p of j.pairs || []) {
-      const m = p.baseToken?.address; if (!chunk.includes(m)) continue;
-      if (!best.has(m) || (p.volume?.h24 || 0) > (best.get(m).volume?.h24 || 0)) best.set(m, p);
+  const { db } = ctx;
+  const coins = await db.coins.find({ status: 'live' }, { projection: { token: 1, curve: 1 } }).toArray();
+  if (!coins.length) return;
+  const m = await ponsMarkets(ctx, coins);
+  const now = new Date(ctx.now());
+  for (const c of coins) {
+    const x = m[c.token.toLowerCase()] || {};
+    const set = { updatedAt: now };
+    for (const k of ['mcapUsd', 'priceUsd', 'vol24Usd', 'trades24', 'change24', 'curveProgress']) if (x[k] != null && isFinite(x[k])) set[k] = x[k];
+    if (x.graduated != null) set.graduated = !!x.graduated;
+    if (set.mcapUsd) await db.ticks.insertOne({ token: c.token, t: now, m: set.mcapUsd });
+    // no Pons chart yet (brand new coin): 24h change from our own chart points
+    if (set.change24 == null && set.mcapUsd) {
+      const old = await db.ticks.find({ token: c.token, t: { $lte: new Date(ctx.now() - 86400000) } }).sort({ t: -1 }).limit(1).next()
+        || await db.ticks.find({ token: c.token }).sort({ t: 1 }).limit(1).next();
+      if (old?.m) set.change24 = set.mcapUsd / old.m - 1;
     }
-    for (const [m, p] of best) {
-      const set = { vol24Usd: p.volume?.h24 || 0, txns24: (p.txns?.h24?.buys || 0) + (p.txns?.h24?.sells || 0) };
-      if (typeof p.priceChange?.h24 === 'number') set.change24 = p.priceChange.h24 / 100;
-      await db.coins.updateOne({ mint: m }, { $set: set });
-    }
+    await db.coins.updateOne({ token: c.token }, { $set: set });
   }
 }
+
+export const weiToEth = w => Number(ethers.formatEther(big(w)));

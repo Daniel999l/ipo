@@ -8,7 +8,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/app.css">
-<script src="/vendor/web3.js"></script>
 </head>
 <body>
 <div class="top">
@@ -18,7 +17,7 @@
 <div class="wrap"><div id="tok"></div><div id="ftr"></div></div>
 
 <script type="module">
-import { $, api, postJson, esc, usd, sol, money, pct, ago, avatar, spark, header, footer, tokenBox, getConfig, connectWallet, connectedWallet, txFrom, txTo, toast, copy, overlay, ARROW, followers, CHECK } from '/assets/app.js';
+import { $, api, postJson, esc, usd, ethAmt, money, pct, ago, avatar, spark, header, footer, tokenBox, getConfig, connectWallet, connectedWallet, restoreWallet, sendTx, cancelled, txLink, toast, copy, overlay, ARROW, followers, CHECK } from '/assets/app.js';
 header(); footer(); tokenBox($('#tok'));
 
 const HANDLE = decodeURIComponent(location.pathname.replace(/^\/@/, '').replace(/\/$/, ''));
@@ -28,7 +27,7 @@ let coin = null, range = '24h', side = 'buy', cfg = null;
 
 // ---------- not public yet
 function renderFresh(info = {}) {
-  const fee = cfg.listingFeeSol;
+  const fee = cfg.listingFeeEth;
   const p = info.profile; const h = info.handle || HANDLE;
   const missing = info.exists === false;
   const who = p ? `<div class="who"><b>${esc(p.name)}</b>${p.verified ? CHECK : ''} @${esc(h)}</div>` : '';
@@ -45,9 +44,9 @@ function renderFresh(info = {}) {
     ${p?.bio ? `<p class="bio">${esc(p.bio)}</p>` : ''}${fl}
     <p class="sub" style="margin-top:22px">Be the one who rings the bell. You open the market, you are first in line, and every trade from then on counts toward @${esc(h)}.</p>
     <div class="cta"><button class="btn grn" id="listBtn">Take @${esc(h)} public ${ARROW}</button><div class="err" id="err"></div></div>
-    <div class="cost"><span>Listing fee <b>${fee} SOL</b></span><span>Setup <b>about 0.02 SOL</b></span><span>Owner share <b>${cfg.handleSharePct}% of fees</b></span></div>
+    <div class="cost"><span>Listing fee <b>${fee} ETH</b></span><span>Network <b>Robinhood Chain</b></span><span>Owner share <b>${cfg.handleSharePct}% of fees</b></span></div>
     <div class="steps">
-      <div class="step"><div class="k">01</div><h3>Sign once</h3><p>One approval in your wallet. The fee, the market and the fee split all happen together, or not at all.</p></div>
+      <div class="step"><div class="k">01</div><h3>Pay once</h3><p>One approval in your wallet. If the market cannot open for any reason, your fee is sent back.</p></div>
       <div class="step"><div class="k">02</div><h3>Market opens</h3><p>@${esc(h)} gets its own market instantly. Anyone can buy and sell it here from the first second.</p></div>
       <div class="step"><div class="k">03</div><h3>Fees pile up</h3><p>${cfg.handleSharePct}% of the creator fees from every trade are saved for @${esc(h)}. The owner can claim them any time.</p></div>
     </div></div>`;
@@ -56,23 +55,31 @@ function renderFresh(info = {}) {
 
 async function list() {
   const err = $('#err'); err.textContent = '';
-  let w, ov;
+  let ov;
   try {
-    w = await connectWallet();
-    ov = overlay('Preparing your listing', 'Getting the market ready for @' + HANDLE + '.');
-    const prep = await postJson('/list/prepare', { creator: w.publicKey, handle: HANDLE });
-    ov.set('Approve in your wallet', `One approval lists @${prep.handle} for ${prep.feeSol} SOL plus setup.`);
-    const txs = prep.txs.map(txFrom);
-    const signed = await w.provider.signAllTransactions(txs);
-    ov.set('Ringing the bell', 'Opening the market. This takes a few seconds.');
-    const res = await postJson('/list/submit', { launchId: prep.launchId, signedTxs: signed.map(txTo) });
+    const w = await connectWallet();
+    ov = overlay('Preparing your listing', 'Holding @' + HANDLE + ' for you.');
+    const prep = await postJson('/list/start', { wallet: w.address, handle: HANDLE });
+    ov.set('Approve in your wallet', `One payment of ${prep.valueEth} ETH takes @${prep.handle} public.`);
+    const hash = await sendTx(w, { to: prep.to, data: prep.data, value: '0x' + BigInt(prep.valueWei).toString(16) });
+    ov.set('Ringing the bell', 'Opening the market on Pons. This takes a few seconds.');
+    let res;
+    for (let i = 0; i < 40; i++) {
+      try { res = await postJson('/list/confirm', { listingId: prep.listingId, txHash: hash }); if (res.status === 'live' || res.status === 'refunded') break; }
+      catch (e) { if (e.status !== 202 && e.status < 500) throw e; }
+      await new Promise(r => setTimeout(r, 3000));
+      res = await api('/list/' + prep.listingId).catch(() => res);
+      if (res?.status === 'live' || res?.status === 'refunded') break;
+    }
     ov.close();
-    toast(`@${esc(res.handle)} is public. <a href="https://solscan.io/tx/${esc(res.signature)}" target="_blank" rel="noopener">View</a>`, 5000);
+    if (res?.status === 'refunded') { err.textContent = `Someone else took @${HANDLE} public first. Your payment was sent back.`; return load(); }
+    if (res?.status !== 'live') { err.textContent = 'Your payment went through. The market is still opening, this page updates by itself.'; return; }
+    toast(`@${esc(res.handle)} is public. <a href="${esc(txLink(cfg, res.listTx || hash))}" target="_blank" rel="noopener">View</a>`, 5000);
     await load();
   } catch (e) {
     ov?.close();
-    if (e.status === 409 && e.body?.mint) return load();
-    err.textContent = /reject|denied|cancel/i.test(e.message) ? 'You cancelled in your wallet.' : e.message;
+    if (e.status === 409 && e.body?.token) return load();
+    err.textContent = cancelled(e) ? 'You cancelled in your wallet.' : e.message;
   }
 }
 
@@ -90,46 +97,48 @@ function renderListed() {
           </div>
         </div>
         ${c.profile?.bio ? `<p class="bio">${esc(c.profile.bio)}</p>` : ''}
-        <div class="bigpx"><b>${usd(c.mcapLamports)}</b><span class="${ch.c}">${ch.t} today</span></div>
+        <div class="bigpx"><b>${money(c.mcapUsd)}</b><span class="${ch.c}">${ch.t} today</span></div>
         <div class="lbl" style="margin-top:6px">Market value</div>
         <div class="chead"><span class="lbl">Price history</span><div class="tabs" id="rng"><button data-r="1h">1H</button><button data-r="24h">24H</button><button data-r="7d">7D</button></div></div>
         <div class="chartbox" id="chart"></div>
         <div class="kv4">
           <div><span>24h volume</span><b>${money(c.vol24Usd || 0)}</b></div>
-          <div><span>Trades 24h</span><b>${(c.txns24 || 0).toLocaleString('en-US')}</b></div>
-          <div><span>Earned for @${esc(c.handle)}</span><b>${usd(c.collectedLamports)}</b></div>
+          <div><span>Price</span><b>${money(c.priceUsd)}</b></div>
+          <div><span>Earned for @${esc(c.handle)}</span><b>${usd(c.collectedEth)}</b></div>
           <div><span>To graduation</span><b>${prog}%</b><div class="prog"><i style="width:${prog}%"></i></div></div>
         </div>
       </div>
       <div class="panel ca" style="margin-top:16px;padding:22px 26px">
         <span class="lbl">Contract address</span>
-        <code><span>${esc(c.mint)}</span><button id="mintCopy">Copy</button></code>
-        <div class="row2"><a class="btn" href="https://pump.fun/coin/${esc(c.mint)}" target="_blank" rel="noopener">Open on pump.fun</a><a class="btn" href="https://dexscreener.com/solana/${esc(c.mint)}" target="_blank" rel="noopener">View on DexScreener</a></div>
+        <code><span>${esc(c.token)}</span><button id="mintCopy">Copy</button></code>
+        <div class="row2"><a class="btn" href="${esc(c.ponsUrl)}" target="_blank" rel="noopener">Open on Pons</a><a class="btn" href="${esc(cfg.explorer)}/token/${esc(c.token)}" target="_blank" rel="noopener">View on explorer</a></div>
       </div>
     </div>
     <div class="side">
-      <div class="panel">
+      ${c.graduated ? `<div class="panel">
+        <h3 style="font-size:20px;letter-spacing:-.02em">@${esc(c.handle)} graduated</h3>
+        <p style="margin-top:10px;color:var(--mute);font-size:14px;line-height:1.55">It filled its curve and now trades in its own pool on Pons. Fees keep counting toward @${esc(c.handle)}.</p>
+        <a class="gobtn b" style="display:flex;align-items:center;justify-content:center;text-decoration:none;margin-top:18px" href="${esc(c.ponsUrl)}" target="_blank" rel="noopener">Trade on Pons</a>
+      </div>` : `<div class="panel">
         <div class="seg"><button class="b" data-side="buy">Buy</button><button class="s" data-side="sell">Sell</button></div>
-        <div class="amt"><input id="amt" inputmode="decimal" autocomplete="off"><span class="u" id="unit">SOL</span></div>
+        <div class="amt"><input id="amt" inputmode="decimal" autocomplete="off"><span class="u" id="unit">ETH</span></div>
         <div class="chips" id="chips"></div>
         <div class="have"><span>You hold</span><b id="hold">Connect to see</b></div>
         <button class="gobtn b" id="goBtn">Buy @${esc(c.handle)}</button>
         <div class="err" id="terr"></div>
-        <p class="note">Trades go through pump.fun from your own wallet. Prices move fast, so small differences from the quote are normal.</p>
-      </div>
+        <p class="note">Trades go straight to the Pons market from your own wallet on Robinhood Chain. Prices move fast, so small differences from the quote are normal.</p>
+      </div>`}
       <div class="panel claimbox">
         <h3>Is this your account?</h3>
         <p>${cfg.handleSharePct}% of the creator fees from every @${esc(c.handle)} trade are saved for you.</p>
-        <div class="earned"><b>${usd(c.vaultLamports)}</b><span>ready to claim</span></div>
+        <div class="earned"><b>${usd(c.owedEth)}</b><span>ready to claim</span></div>
         <a class="btn pri" href="/claim?h=${encodeURIComponent(c.handle)}">Claim your fees</a>
       </div>
     </div></div>`;
-  $('#mintCopy').addEventListener('click', e => copy(c.mint, e.currentTarget));
+  $('#mintCopy').addEventListener('click', e => copy(c.token, e.currentTarget));
   document.querySelectorAll('#rng button').forEach(b => { b.classList.toggle('on', b.dataset.r === range); b.addEventListener('click', () => { range = b.dataset.r; document.querySelectorAll('#rng button').forEach(x => x.classList.toggle('on', x === b)); loadChart(); }); });
   document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => setSide(b.dataset.side)));
-  $('#goBtn').addEventListener('click', trade);
-  setSide(side);
-  refreshHolding();
+  if (!c.graduated) { $('#goBtn').addEventListener('click', trade); setSide(side); refreshHolding(); }
 }
 
 function drawChart(values) {
@@ -141,30 +150,30 @@ function drawChart(values) {
   const svg = box.querySelector('svg'), tip = box.querySelector('#tip');
   svg.addEventListener('mousemove', e => {
     const r = svg.getBoundingClientRect(); const i = Math.max(0, Math.min(a.length - 1, Math.round(((e.clientX - r.left) / r.width) * (a.length - 1))));
-    tip.style.left = ((i / (a.length - 1)) * 100) + '%'; tip.textContent = usd(a[i]); tip.style.opacity = 1;
+    tip.style.left = ((i / (a.length - 1)) * 100) + '%'; tip.textContent = money(a[i]); tip.style.opacity = 1;
   });
   svg.addEventListener('mouseleave', () => (tip.style.opacity = 0));
 }
-async function loadChart() { const d = await api(`/coins/${encodeURIComponent(coin.mint)}?range=${range}`); drawChart(d.chart); }
+async function loadChart() { const d = await api(`/coins/${encodeURIComponent(coin.token)}?range=${range}`); drawChart(d.chart); }
 
 function setSide(s) {
   side = s;
   document.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.side === s));
   const buy = s === 'buy';
-  $('#unit').textContent = buy ? 'SOL' : '%';
-  $('#amt').value = buy ? '0.1' : '50';
-  $('#chips').innerHTML = (buy ? ['0.1', '0.5', '1', '5'] : ['25', '50', '75', '100']).map(v => `<button data-v="${v}">${buy ? v + ' SOL' : v === '100' ? 'All' : v + '%'}</button>`).join('');
+  $('#unit').textContent = buy ? 'ETH' : '%';
+  $('#amt').value = buy ? '0.01' : '50';
+  $('#chips').innerHTML = (buy ? ['0.005', '0.01', '0.05', '0.1'] : ['25', '50', '75', '100']).map(v => `<button data-v="${v}">${buy ? v : v === '100' ? 'All' : v + '%'}</button>`).join('');
   $('#chips').querySelectorAll('button').forEach(b => b.addEventListener('click', () => ($('#amt').value = b.dataset.v)));
   const g = $('#goBtn'); g.className = 'gobtn ' + (buy ? 'b' : 's'); g.textContent = (buy ? 'Buy @' : 'Sell @') + coin.handle;
   $('#terr').textContent = '';
 }
 
 async function refreshHolding() {
-  const w = connectedWallet(); if (!w) return;
+  const w = connectedWallet() || await restoreWallet(); if (!w || !$('#hold')) return;
   try {
-    const h = await api(`/holding?wallet=${w.publicKey}&mint=${coin.mint}`);
-    const t = Number(h.tokens) / 1e6;
-    $('#hold').textContent = t > 0 ? `${t.toLocaleString('en-US', { maximumFractionDigits: 0 })} tokens` : 'None yet';
+    const h = await api(`/holding?wallet=${w.address}&token=${coin.token}`);
+    const t = Number(h.tokens);
+    $('#hold').textContent = t > 0 ? `${t >= 1 ? t.toLocaleString('en-US', { maximumFractionDigits: 0 }) : t.toPrecision(3)} tokens` : 'None yet';
   } catch {}
 }
 
@@ -175,15 +184,21 @@ async function trade() {
     const w = await connectWallet();
     g.disabled = true; g.textContent = 'Preparing...';
     const v = Number($('#amt').value);
-    const body = side === 'buy' ? { sol: v } : { percent: v };
-    const { tx } = await postJson('/trade/prepare', { wallet: w.publicKey, mint: coin.mint, side, ...body });
+    const body = side === 'buy' ? { eth: v } : { percent: v };
+    let r = await postJson('/trade/prepare', { wallet: w.address, token: coin.token, side, ...body });
+    if (r.approve) {
+      g.textContent = 'Allow selling in your wallet';
+      await sendTx(w, r.approve);
+      g.textContent = 'Preparing...';
+      r = await postJson('/trade/prepare', { wallet: w.address, token: coin.token, side, ...body });
+    }
     g.textContent = 'Approve in your wallet';
-    const r = await w.provider.signAndSendTransaction(txFrom(tx));
-    const sig = r?.signature || r;
-    toast(`${side === 'buy' ? 'Bought' : 'Sold'} @${esc(coin.handle)}. <a href="https://solscan.io/tx/${esc(sig)}" target="_blank" rel="noopener">View</a>`, 5000);
-    setTimeout(() => { refreshHolding(); load(); }, 2500);
+    const hash = await sendTx(w, r.tx);
+    toast(`${side === 'buy' ? 'Bought' : 'Sold'} @${esc(coin.handle)}. <a href="${esc(txLink(cfg, hash))}" target="_blank" rel="noopener">View</a>`, 5000);
+    setTimeout(() => { refreshHolding(); load(); }, 1500);
   } catch (e) {
-    err.textContent = /reject|denied|cancel/i.test(e.message) ? 'You cancelled in your wallet.' : e.message;
+    if (e.status === 409 && e.body?.url) { load(); return; }
+    err.textContent = cancelled(e) ? 'You cancelled in your wallet.' : e.message;
   } finally { g.disabled = false; g.textContent = label; }
 }
 
@@ -196,7 +211,7 @@ async function load() {
     if (first || !document.querySelector('.acct')) { renderListed(); drawChart(d.chart); if (range !== '24h') loadChart(); }
     else {
       // light refresh: keep the trade box as the user left it
-      const amt = $('#amt').value; const s = side; renderListed(); setSide(s); $('#amt').value = amt;
+      const amt = $('#amt')?.value; const s = side; renderListed(); if ($('#amt')) { setSide(s); $('#amt').value = amt; }
       if (range === '24h') drawChart(d.chart); else loadChart();
     }
     if (coin.handle !== HANDLE) history.replaceState(null, '', '/@' + coin.handle);

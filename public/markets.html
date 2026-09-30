@@ -26,7 +26,7 @@
 </div>
 <div class="wrap"><div id="tok"></div><div id="ftr"></div></div>
 <script type="module">
-import { $, api, esc, usd, pct, subline, ago, avatar, spark, isUp, header, footer, tokenBox } from '/assets/app.js';
+import { $, api, esc, usd, money, pct, subline, ago, avatar, spark, isUp, header, footer, tokenBox, getConfig } from '/assets/app.js';
 const params = new URLSearchParams(location.search);
 let sort = ['top', 'hot', 'earned', 'new'].includes(params.get('sort')) ? params.get('sort') : 'top';
 header(sort === 'new' ? 'new' : 'markets'); footer(); tokenBox($('#tok'));
@@ -34,7 +34,7 @@ $('#si').value = params.get('q') || '';
 async function load() {
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.s === sort));
   const q = $('#si').value.trim().replace(/^@/, '');
-  const { coins } = await api(`/coins?sort=${sort}&limit=60&q=${encodeURIComponent(q)}`);
+  const [{ coins }] = await Promise.all([api(`/coins?sort=${sort}&limit=60&q=${encodeURIComponent(q)}`), getConfig().catch(() => null)]);
   const head = '<div class="tr hd"><span>#</span><span>Account</span><span>Value</span><span>24h</span><span>Earned</span><span>Last 24h</span><span></span></div>';
   if (!coins.length) {
     const h = q.replace(/[^A-Za-z0-9_]/g, '').slice(0, 15);
@@ -43,7 +43,7 @@ async function load() {
   }
   $('#board').innerHTML = head + coins.map((c, i) => {
     const ch = pct(c.change24);
-    return `<a class="tr" href="/@${esc(c.handle)}"><span class="n">${i + 1}</span><span class="who">${avatar(c.handle)}<div style="min-width:0"><b>@${esc(c.handle)}</b><small>${subline(c, 'Listed ' + esc(ago(c.createdAt)))}</small></div></span><span style="font-weight:600">${usd(c.mcapLamports)}</span><span class="${ch.c}" style="font-weight:600">${ch.t}</span><span style="color:var(--mute)">${usd(c.collectedLamports)}</span>${spark(c.spark, { up: isUp(c), h: 34 })}<span class="tb">Trade</span></a>`;
+    return `<a class="tr" href="/@${esc(c.handle)}"><span class="n">${i + 1}</span><span class="who">${avatar(c.handle)}<div style="min-width:0"><b>@${esc(c.handle)}</b><small>${subline(c, 'Listed ' + esc(ago(c.createdAt)))}</small></div></span><span style="font-weight:600">${money(c.mcapUsd)}</span><span class="${ch.c}" style="font-weight:600">${ch.t}</span><span style="color:var(--mute)">${usd(c.collectedEth)}</span>${spark(c.spark, { up: isUp(c), h: 34 })}<span class="tb">Trade</span></a>`;
   }).join('');
 }
 document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => { sort = b.dataset.s; history.replaceState(null, '', '/markets?sort=' + sort); load(); }));

@@ -1,166 +1,195 @@
-// Taking a handle public. We build ONE transaction that the lister signs:
-//   pay the listing fee + fund the handle's vault + create the coin on pump.fun + lock its creator fees
-//   (HANDLE_SHARE_BPS to the handle vault, the rest to the buyback wallet, admin revoked so nobody can change it).
-// Everything lands together or nothing does. A tiny first buy follows as a second transaction in the same wallet prompt.
-import { Keypair, PublicKey, SystemProgram, VersionedTransaction } from '@solana/web3.js';
-import BN from 'bn.js';
+// Taking a handle public on Pons:
+//   1. start:   the handle is held for the paying wallet, and we hand back what to send (house wallet, price, a tag)
+//   2. confirm: the lister's payment is checked on chain (right wallet, right amount, right tag, never used before)
+//   3. launch:  the house wallet launches the coin on Pons with the handle's own vault as the creator fee recipient
+// Every step is saved before it happens, so a crash or restart finishes the listing (or refunds it) on the next tick.
+import { ethers } from 'ethers';
 import { randomUUID } from 'crypto';
-import sdk from './pumpsdk.js';
-import { launchInstructions, verifyLock, feeSharingConfigPda, NATIVE_MINT, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, OnlinePumpSdk, PUMP_SDK } from './pump.js';
-import { buildV0, budgetIxs, sendSigned } from './tx.js';
-import { encryptSecret } from './crypto.js';
-import { parseHandle, coinLabel, handleExists, getProfile, publicProfile } from './handles.js';
-import { uploadCoinMetadata } from './metadata.js';
+import { nextSeq } from './db.js';
+import { parseHandle, coinLabel, handleExists, publicProfile } from './handles.js';
+import { waitReceipt } from './chain.js';
+import { buildLaunch, launchedFromReceipt, coinLogo, ethUsd, UserError } from './pons.js';
 
-const { newBondingCurve, getBuyTokenAmountFromSolAmount } = sdk;
+export { UserError as LaunchError };
 
-export class LaunchError extends Error { constructor(msg, status = 400) { super(msg); this.status = status; } }
+const tagFor = id => ethers.keccak256(ethers.toUtf8Bytes('ipo-list:' + id));
+const lc = a => String(a || '').toLowerCase();
 
-export const lockOpts = cfg => ({ buyback: cfg.buyback, potBps: cfg.handleShareBps });
-
-async function nextSerial(db) {
-  const r = await db.settings.findOneAndUpdate({ _id: 'serial' }, { $inc: { value: 1 } }, { upsert: true, returnDocument: 'after' });
-  const doc = r && r.value !== undefined && r._id === undefined ? r.value : r;
-  return 1000 + (doc?.value || 1);
+async function releaseExpired(ctx) {
+  await ctx.db.listings.updateMany({ status: 'awaiting', expiresAt: { $lt: new Date(ctx.now()) } }, { $set: { status: 'expired' }, $unset: { hold: '' } });
 }
 
-// Holds the handle for this wallet while it signs, so two people can't list the same handle at once.
-async function reserve(ctx, { key, creator, launchId }) {
-  const { db, cfg } = ctx;
-  const now = new Date(ctx.now());
-  await db.launches.deleteMany({ key, submitting: { $ne: true }, $or: [{ expiresAt: { $lt: now } }, { creator }] });
-  try {
-    await db.launches.insertOne({ _id: launchId, key, creator, createdAt: now, expiresAt: new Date(ctx.now() + cfg.reserveSeconds * 1000) });
-  } catch (e) {
-    if (e.code === 11000) throw new LaunchError('Someone is taking this account public right now. Try again in a minute.', 409);
-    throw e;
-  }
-}
-
-export async function prepareListing(ctx, { creator, handle: input }) {
-  const { conn, cfg, db, lut } = ctx;
-  let creatorPk;
-  try { creatorPk = new PublicKey(creator); } catch { throw new LaunchError('Connect a wallet first.'); }
+export async function startListing(ctx, { handle: input, wallet }) {
+  const { db, cfg, chain } = ctx;
+  if (!ethers.isAddress(wallet)) throw new UserError('Connect a wallet first.');
+  const payer = lc(wallet);
   const { handle, key } = parseHandle(input);
-  const listed = await db.coins.findOne({ key }, { projection: { mint: 1, handle: 1 } });
-  if (listed) throw Object.assign(new LaunchError(`@${listed.handle} is already public.`, 409), { mint: listed.mint });
-  if (cfg.checkHandles && (await handleExists(ctx, key, handle)) === 'missing') throw new LaunchError(`We could not find @${handle} on X.`, 404);
-
-  const launchId = randomUUID();
-  await reserve(ctx, { key, creator: creatorPk.toBase58(), launchId });
-  try {
-    const serial = await nextSerial(db);
-    const { name, symbol } = coinLabel(serial);
-    const meta = await uploadCoinMetadata(ctx, { name, symbol, website: cfg.publicUrl ? `${cfg.publicUrl}/@${handle}` : undefined });
-
-    const mint = ctx.vanity ? await ctx.vanity.take() : Keypair.generate();
-    const vault = Keypair.generate();
-    // tx 1: listing fee + fund vault + create coin + lock fees (atomic)
-    const ixs = [...budgetIxs({ units: 450000, microLamports: cfg.priorityMicroLamports })];
-    if (cfg.listingFeeLamports > 0) ixs.push(SystemProgram.transfer({ fromPubkey: creatorPk, toPubkey: cfg.treasury, lamports: cfg.listingFeeLamports }));
-    ixs.push(SystemProgram.transfer({ fromPubkey: creatorPk, toPubkey: vault.publicKey, lamports: cfg.vaultReserveLamports }));
-    ixs.push(...await launchInstructions({ mint: mint.publicKey, creator: creatorPk, pot: vault.publicKey, name, symbol, uri: meta.uri, ...lockOpts(cfg) }));
-    const { tx, blockhash } = await buildV0(conn, { payer: creatorPk, ixs, luts: lut ? [lut] : [] });
-    tx.sign([mint]);
-    if (tx.serialize().length > 1232) throw new LaunchError('Listing transaction too large', 500);
-    const txs = [tx];
-    // tx 2: tiny first buy so the market has a trade from the start
-    if (cfg.devBuyLamports > 0) {
-      const buy = [...budgetIxs({ units: 250000, microLamports: cfg.priorityMicroLamports }), ...await devBuyIxs(conn, { mint: mint.publicKey, user: creatorPk, lamports: BigInt(cfg.devBuyLamports) })];
-      txs.push((await buildV0(conn, { payer: creatorPk, ixs: buy, luts: lut ? [lut] : [], blockhash })).tx);
-    }
-
-    await db.launches.updateOne({ _id: launchId }, { $set: {
-      handle, mint: mint.publicKey.toBase58(), vault: vault.publicKey.toBase58(), vaultKey: encryptSecret(vault.secretKey, cfg.vaultMasterKey),
-      messages: txs.map(t => Buffer.from(t.message.serialize()).toString('base64')), lastValidBlockHeight: blockhash.lastValidBlockHeight, blockhash: blockhash.blockhash,
-      meta: { name, symbol, uri: meta.uri, image: meta.image, serial },
-    } });
-    return {
-      launchId, handle, mint: mint.publicKey.toBase58(), vault: vault.publicKey.toBase58(),
-      feeSol: cfg.listingFeeLamports / 1e9, txs: txs.map(t => Buffer.from(t.serialize()).toString('base64')),
-    };
-  } catch (e) {
-    await db.launches.deleteOne({ _id: launchId }).catch(() => {});
-    throw e;
+  const listed = await db.coins.findOne({ key }, { projection: { token: 1, handle: 1 } });
+  if (listed) throw Object.assign(new UserError(`@${listed.handle} is already public.`, 409), { token: listed.token });
+  if (cfg.checkHandles && (await handleExists(ctx, key, handle)) === 'missing') throw new UserError(`We could not find @${handle} on X.`, 404);
+  await releaseExpired(ctx);
+  // the same wallet starting again gets its own listing back
+  const mine = await db.listings.findOne({ hold: key, payer, status: 'awaiting' });
+  const l = mine || { _id: randomUUID(), key, handle, payer, priceWei: cfg.listingFeeWei.toString(), status: 'awaiting', hold: key, createdAt: new Date(ctx.now()) };
+  l.expiresAt = new Date(ctx.now() + cfg.reserveMinutes * 60000);
+  if (mine) await db.listings.updateOne({ _id: l._id }, { $set: { expiresAt: l.expiresAt } });
+  else {
+    try { await db.listings.insertOne(l); }
+    catch (e) { if (e.code === 11000) throw new UserError('Someone is taking this account public right now. Try again in a few minutes.', 409); throw e; }
   }
+  return { listingId: l._id, handle, to: chain.house.address, valueWei: l.priceWei, valueEth: ethers.formatEther(l.priceWei), data: tagFor(l._id), chainId: cfg.chainId, expiresAt: l.expiresAt };
 }
 
-// The lister sends back the transactions with their signature. We only accept the exact transactions we built.
-export async function submitListing(ctx, { launchId, signedTxs }) {
-  const { conn, db } = ctx;
-  const l = await db.launches.findOne({ _id: String(launchId) });
-  if (!l || !l.messages) throw new LaunchError('This listing expired. Start again.', 404);
-  const raw = Array.isArray(signedTxs) ? signedTxs : [];
-  if (raw.length !== l.messages.length) throw new LaunchError('Sign every transaction of the listing.');
-  const txs = raw.map(r => { try { return VersionedTransaction.deserialize(Buffer.from(String(r), 'base64')); } catch { throw new LaunchError('Could not read the signed transaction.'); } });
-  txs.forEach((tx, i) => {
-    if (Buffer.from(tx.message.serialize()).toString('base64') !== l.messages[i]) throw new LaunchError('Transaction was changed after it was prepared.');
-    if (tx.message.staticAccountKeys[0].toBase58() !== l.creator || !tx.signatures.every(s => s.some(b => b !== 0))) throw new LaunchError('Wallet signature missing.');
-  });
-  // in flight: keep the handle held and remember the signature, so a restart can finish the listing
-  const sig1 = (await import('bs58')).default.encode(txs[0].signatures[0]);
-  const claim = await db.launches.updateOne({ _id: l._id, submitting: { $ne: true } }, { $set: { submitting: true, sig: sig1, submittedAt: new Date(), expiresAt: new Date(Date.now() + 3600000) } });
-  if (!claim.modifiedCount) throw new LaunchError('This listing is already being sent.', 409);
-  let sig;
-  try { sig = await sendSigned(conn, txs[0], { lastValidBlockHeight: l.lastValidBlockHeight }); }
-  catch (e) {
-    const st = await conn.getSignatureStatus(sig1, { searchTransactionHistory: true }).catch(() => null);
-    if (!st?.value || st.value.err) { await db.launches.deleteOne({ _id: l._id }); throw new LaunchError(humanChainError(e), 400); }
-    sig = sig1; // it landed after all
-  }
-  const out = await finalizeListing(ctx, l, sig);
-  if (txs[1]) {
-    try { out.devBuySignature = await sendSigned(conn, txs[1], { lastValidBlockHeight: l.lastValidBlockHeight }); }
-    catch (e) { out.devBuyError = humanChainError(e); }
-  }
-  return out;
-}
-
-export async function finalizeListing(ctx, l, sig) {
-  const { conn, db, cfg } = ctx;
-  const lock = await verifyLock(conn, l.mint, l.vault, lockOpts(cfg));
-  if (!lock.ok) throw new LaunchError('The coin was created but its fees are not locked to the account, so it will not be listed.', 409);
-  const coin = {
-    handle: l.handle, key: l.key, profile: null, mint: l.mint, vault: l.vault, vaultKey: l.vaultKey, lister: l.creator, ...l.meta,
-    status: 'live', graduated: false, listSig: sig, createdAt: new Date(ctx.now()),
-    vaultLamports: 0, collectedLamports: 0, paidLamports: 0,
-    lock: { sharingConfig: lock.sharingConfig, adminRevoked: lock.adminRevoked, checkedAt: new Date() },
-    split: { buyback: new PublicKey(cfg.buyback).toBase58(), potBps: cfg.handleShareBps },
-  };
-  const p = await db.profiles.findOne({ _id: l.key });
-  if (p?.status === 'found') { coin.profile = publicProfile(p.profile); coin.handle = p.profile.handle || l.handle; coin.profileAt = p.at; }
-  await db.coins.updateOne({ key: l.key }, { $setOnInsert: coin }, { upsert: true });
-  await db.launches.deleteOne({ _id: l._id });
-  return { handle: l.handle, mint: l.mint, vault: l.vault, signature: sig };
-}
-
-// Listings that were sent but not finished (server restart, lost connection): finish or release them.
-export async function recoverListings(ctx) {
-  const { db, conn } = ctx;
-  const stuck = await db.launches.find({ submitting: true, submittedAt: { $lt: new Date(Date.now() - 30000) } }).toArray();
-  for (const l of stuck) {
+// check the lister's payment on chain, then launch
+export async function confirmListing(ctx, { listingId, txHash }) {
+  const { db, cfg, chain } = ctx;
+  const l = await db.listings.findOne({ _id: String(listingId) });
+  if (!l) throw new UserError('Listing not found. Start again.', 404);
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash))) throw new UserError('That payment does not look right.');
+  const hash = lc(txHash);
+  if (l.payTx && l.payTx !== hash) throw new UserError('This listing is already paid.', 409);
+  if (!l.payTx) {
+    const rc = await waitReceipt(chain.provider, hash, 20000);
+    if (!rc) throw new UserError('We could not see your payment yet. Try again in a moment.', 202);
+    const tx = await chain.provider.getTransaction(hash);
+    const problems = [];
+    if (rc.status !== 1) problems.push('the payment failed');
+    if (lc(tx.to) !== lc(chain.house.address)) problems.push('it was not sent to the listing wallet');
+    if (lc(tx.from) !== l.payer) problems.push('it came from a different wallet');
+    if (BigInt(tx.value) < BigInt(l.priceWei)) problems.push('the amount is too small');
+    if (lc(tx.data) !== lc(tagFor(l._id))) problems.push('it is missing the listing code');
+    if (problems.length) throw new UserError('That payment does not match this listing: ' + problems.join(', ') + '.');
     try {
-      const st = (await conn.getSignatureStatus(l.sig, { searchTransactionHistory: true })).value;
-      if (st && !st.err && ['confirmed', 'finalized'].includes(st.confirmationStatus)) await finalizeListing(ctx, l, l.sig);
-      else if (st?.err || (await conn.getBlockHeight('confirmed')) > l.lastValidBlockHeight) await db.launches.deleteOne({ _id: l._id });
-    } catch (e) { ctx.log?.warn?.('recover listing', l.handle, e.message); }
+      const upd = await db.listings.updateOne({ _id: l._id, payTx: { $exists: false } }, { $set: { payTx: hash, paidWei: BigInt(tx.value).toString(), paidAt: new Date(ctx.now()), status: 'paid' } });
+      if (!upd.modifiedCount) throw new UserError('This listing is already paid.', 409);
+    } catch (e) { if (e.code === 11000) throw new UserError('That payment was already used.', 409); throw e; }
+    // paid after the hold ran out: take the hold back if nobody else has the handle, otherwise refund
+    if (l.status === 'expired') {
+      try { await db.listings.updateOne({ _id: l._id }, { $set: { hold: l.key } }); }
+      catch { await db.listings.updateOne({ _id: l._id }, { $set: { status: 'refund' } }); }
+    }
   }
+  return processListing(ctx, l._id);
 }
 
-// First buy, placed after the fee lock, so the curve creator is already the fee-sharing config.
-export async function devBuyIxs(conn, { mint, user, lamports }) {
-  const online = new OnlinePumpSdk(conn);
-  const [global, feeConfig] = await Promise.all([online.fetchGlobal(), online.fetchFeeConfig()]);
-  const quoteAmount = new BN(lamports.toString());
-  const amount = getBuyTokenAmountFromSolAmount({ global, feeConfig, mintSupply: null, bondingCurve: null, amount: quoteAmount });
-  const curve = { ...newBondingCurve(global), creator: feeSharingConfigPda(mint), quoteMint: NATIVE_MINT, isMayhemMode: false };
-  return PUMP_SDK.buyV2Instructions({ global, bondingCurveAccountInfo: null, bondingCurve: curve, associatedUserAccountInfo: null, mint, user, amount, quoteAmount, slippage: 2, tokenProgram: TOKEN_2022_PROGRAM_ID, quoteTokenProgram: TOKEN_PROGRAM_ID });
+// moves one listing forward as far as it can go. Safe to call again at any time.
+export async function processListing(ctx, id) {
+  return ctx.chain.houseTx(() => step(ctx, id));
 }
 
-export function humanChainError(e) {
-  const m = String(e?.message || e);
-  if (/insufficient (funds|lamports)|0x1\b|Attempt to debit an account/i.test(m)) return 'Not enough SOL in your wallet.';
-  if (/expired|block height exceeded/i.test(m)) return 'It took too long to confirm. Try again.';
-  if (/slippage|TooMuchSolRequired|TooLittleSolReceived|0x1772|0x1773|ExceededSlippage/i.test(m)) return 'The price moved too much. Try again.';
-  return 'The network rejected it: ' + m.slice(0, 160);
+async function step(ctx, id) {
+  const { db, cfg, chain } = ctx;
+  let l = await db.listings.findOne({ _id: id });
+  if (!l) throw new UserError('Listing not found.', 404);
+  if (l.status === 'live' || l.status === 'refunded') return view(l);
+  if (l.status === 'refund') return refund(ctx, l);
+  if (!['paid', 'launching'].includes(l.status)) return view(l);
+
+  // a launch was already sent: see how it ended before doing anything else
+  if (l.launchTx) {
+    const rc = await settle(ctx, l.launchTx, l.launchRaw, l.launchNonce);
+    if (rc === 'pending') return view(l); // still on its way, next tick
+    if (rc?.status === 1) return finalize(ctx, l, rc);
+    await db.listings.updateOne({ _id: l._id }, { $unset: { launchTx: '', launchNonce: '', launchRaw: '' }, $set: { status: 'paid' } });
+    l = await db.listings.findOne({ _id: id });
+  }
+  // somebody else's listing won the handle meanwhile
+  const taken = await db.coins.findOne({ key: l.key });
+  if (taken) { await db.listings.updateOne({ _id: l._id }, { $set: { status: 'refund' }, $unset: { hold: '' } }); return refund(ctx, await db.listings.findOne({ _id: id })); }
+
+  if (!l.vaultIndex) {
+    const vaultIndex = await nextSeq(db, 'vault');
+    const serial = 1000 + await nextSeq(db, 'serial');
+    const { name, symbol } = coinLabel(serial);
+    await db.listings.updateOne({ _id: l._id }, { $set: { vaultIndex, serial, name, symbol, vault: chain.vaultWallet(vaultIndex).address } });
+    l = await db.listings.findOne({ _id: id });
+  }
+  const logo = await coinLogo(ctx);
+  const req = await buildLaunch(ctx, { name: l.name, symbol: l.symbol, logo, website: `${cfg.publicUrl}/@${l.handle}`, vault: l.vault });
+  const rc = await chain.sendSigned(chain.house, req, {
+    onSigned: async ({ hash, nonce, raw }) => {
+      await db.listings.updateOne({ _id: l._id }, { $set: { status: 'launching', launchTx: hash, launchNonce: nonce, launchRaw: raw } });
+    },
+  });
+  return finalize(ctx, await db.listings.findOne({ _id: id }), rc);
+}
+
+async function finalize(ctx, l, rc) {
+  const { db, chain } = ctx;
+  const ev = launchedFromReceipt(rc);
+  if (!ev) throw new Error('launch receipt has no TokenLaunched event: ' + rc.hash);
+  const info = await chain.factory.getLaunchedToken(ev.token);
+  if (lc(info.creatorFeeRecipient) !== lc(l.vault)) throw new Error('launched coin has the wrong fee recipient: ' + ev.token);
+  const p = await db.profiles.findOne({ _id: l.key });
+  const coin = {
+    handle: p?.status === 'found' ? (p.profile.handle || l.handle) : l.handle, key: l.key,
+    profile: p?.status === 'found' ? publicProfile(p.profile) : null, profileAt: p?.at || null,
+    token: ev.token, curve: ev.curve, vaultIndex: l.vaultIndex, vault: l.vault, lister: l.payer,
+    name: l.name, symbol: l.symbol, serial: l.serial, listTx: rc.hash, payTx: l.payTx,
+    status: 'live', graduated: false, createdAt: new Date(ctx.now()),
+    collectedWei: '0', owedWei: '0', paidWei: '0', buybackWei: '0',
+  };
+  await db.coins.updateOne({ key: l.key }, { $setOnInsert: coin }, { upsert: true });
+  await db.listings.updateOne({ _id: l._id }, { $set: { status: 'live', token: ev.token, liveAt: new Date(ctx.now()) }, $unset: { hold: '' } });
+  // first market value right away (straight from the curve), so the new page never shows $0
+  try {
+    const [[qr, tr], px] = await Promise.all([chain.curveAt(ev.curve).getReserves(), ethUsd()]);
+    if (tr > 0n && px) { const priceUsd = Number(qr) / Number(tr) * px; await db.coins.updateOne({ token: ev.token, mcapUsd: { $exists: false } }, { $set: { priceUsd, mcapUsd: priceUsd * 1e9, curveProgress: 0 } }); }
+  } catch {}
+  return { status: 'live', handle: coin.handle, token: ev.token, curve: ev.curve, listTx: rc.hash };
+}
+
+// pays the lister back (minus the transfer's own gas) when their listing can't happen
+async function refund(ctx, l) {
+  const { db, chain } = ctx;
+  if (l.refundTx) {
+    const rc = await settle(ctx, l.refundTx, l.refundRaw, l.refundNonce);
+    if (rc === 'pending') return view(l);
+    if (rc?.status === 1) { await db.listings.updateOne({ _id: l._id }, { $set: { status: 'refunded' }, $unset: { hold: '' } }); return view({ ...l, status: 'refunded' }); }
+  }
+  const fee = await chain.provider.getFeeData();
+  const to = ethers.getAddress(l.payer);
+  const gasLimit = (await chain.provider.estimateGas({ from: chain.house.address, to, value: 1n })) * 130n / 100n;
+  const maxFeePerGas = (fee.maxFeePerGas ?? fee.gasPrice) * 2n;
+  const gasCost = gasLimit * maxFeePerGas;
+  const amount = BigInt(l.paidWei || '0') - gasCost;
+  if (amount <= 0n) { await db.listings.updateOne({ _id: l._id }, { $set: { status: 'refunded', refundNote: 'too small to send back' } }); return view({ ...l, status: 'refunded' }); }
+  const rc = await chain.sendSigned(chain.house, { to, value: amount, gasLimit, maxFeePerGas }, {
+    onSigned: async ({ hash, nonce, raw }) => {
+      await db.listings.updateOne({ _id: l._id }, { $set: { refundTx: hash, refundNonce: nonce, refundRaw: raw, refundWei: amount.toString() } });
+    },
+  });
+  await db.listings.updateOne({ _id: l._id }, { $set: { status: 'refunded' }, $unset: { hold: '' } });
+  return { status: 'refunded', refundTx: rc.hash };
+}
+
+// how did a transaction we signed earlier end? receipt, 'pending', or null (it never happened and its nonce is gone)
+async function settle(ctx, hash, raw, nonce) {
+  const { provider, house } = ctx.chain;
+  const rc = await provider.getTransactionReceipt(hash);
+  if (rc) return rc;
+  if ((await provider.getTransactionCount(house.address, 'latest')) > nonce) return null;
+  // signed but maybe never broadcast (crash): send the exact same transaction again, it can only land once
+  if (raw) await provider.broadcastTransaction(raw).catch(() => {});
+  const w = await waitReceipt(provider, hash, 30000);
+  return w || 'pending';
+}
+
+function view(l) {
+  return { status: l.status, handle: l.handle, token: l.token || null, refundTx: l.refundTx || null };
+}
+
+export async function listingStatus(ctx, id) {
+  const l = await ctx.db.listings.findOne({ _id: String(id) });
+  if (!l) throw new UserError('Listing not found.', 404);
+  return view(l);
+}
+
+// finish (or refund) anything that was paid but not finished, e.g. after a restart
+export async function recoverListings(ctx) {
+  await releaseExpired(ctx);
+  const open = await ctx.db.listings.find({ status: { $in: ['paid', 'launching', 'refund'] } }).toArray();
+  for (const l of open) {
+    try { await processListing(ctx, l._id); } catch (e) { ctx.log?.warn?.('listing', l.handle, e.shortMessage || e.message); }
+  }
 }

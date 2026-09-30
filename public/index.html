@@ -86,10 +86,10 @@ function mainCard(c) {
   const ch = pct(c.change24);
   return `${card(c, 'main')}
     <div class="row">${avatar(c.handle)}<div><div class="hn">@${esc(c.handle)}</div><div class="hs">${c.profile?.followers ? followers(c.profile.followers) + ' followers' : '#' + (c.rank || 1) + ' on IPO'}</div></div><span class="tag">LISTED ${esc(ago(c.createdAt).replace(' ago', '').toUpperCase())} AGO</span></div>
-    <div class="px"><b>${usd(c.mcapLamports)}</b><span class="${ch.c}">${ch.t}</span></div>
+    <div class="px"><b>${money(c.mcapUsd)}</b><span class="${ch.c}">${ch.t}</span></div>
     <div class="lbl">Market value</div>
     <div class="chart">${spark(c.spark, { w: 360, h: 130, up: isUp(c), big: true })}</div>
-    <div class="kv"><div><span>24h volume</span><b>${money(c.vol24Usd || 0)}</b></div><div><span>To graduation</span><b>${Math.round((c.curveProgress || 0) * 100)}%</b></div><div><span>Earned</span><b>${usd(c.collectedLamports)}</b></div></div>
+    <div class="kv"><div><span>24h volume</span><b>${money(c.vol24Usd || 0)}</b></div><div><span>To graduation</span><b>${Math.round((c.curveProgress || 0) * 100)}%</b></div><div><span>Earned</span><b>${usd(c.collectedEth)}</b></div></div>
     <div class="acts"><span class="b">Buy</span><span class="s">Sell</span></div></a>`;
 }
 function miniCard(c, cls, line) {
@@ -105,7 +105,7 @@ async function load() {
   await getConfig().then(c => { $('#sharePct').textContent = c.handleSharePct + '%'; }).catch(() => {});
   $('#sListed').textContent = stats.listed.toLocaleString('en-US');
   $('#sToday').textContent = stats.listedToday.toLocaleString('en-US');
-  $('#sEarned').textContent = usd(stats.earnedLamports);
+  $('#sEarned').textContent = usd(stats.earnedEth);
   if (stats.listedToday) $('#eyebrow').textContent = `${stats.listedToday.toLocaleString('en-US')} ${stats.listedToday === 1 ? 'account' : 'accounts'} went public today`;
   $('#trend').innerHTML = hot.coins.length ? 'Trending ' + hot.coins.map(c => `<a href="/@${esc(c.handle)}">@${esc(c.handle)}</a>`).join('') : '';
 
@@ -116,7 +116,7 @@ async function load() {
   else {
     const d = (await api('/coins/' + encodeURIComponent(t.mint)).catch(() => null))?.coin;
     const others = fresh.coins.filter(c => c.mint !== t.mint);
-    stage.innerHTML = orbit + (others[0] ? miniCard(others[0], 'm1', `Market value <b>${usd(others[0].mcapLamports)}</b>`) : '') + mainCard({ ...t, rank: d?.rank || 1 }) + (others[1] ? miniCard(others[1], 'm2', `Earned so far <b>${usd(others[1].collectedLamports)}</b>`) : '');
+    stage.innerHTML = orbit + (others[0] ? miniCard(others[0], 'm1', `Market value <b>${money(others[0].mcapUsd)}</b>`) : '') + mainCard({ ...t, rank: d?.rank || 1 }) + (others[1] ? miniCard(others[1], 'm2', `Earned so far <b>${usd(others[1].collectedEth)}</b>`) : '');
   }
 
   if (fresh.coins.length) {
@@ -129,7 +129,7 @@ async function load() {
 
   $('#fresh').innerHTML = fresh.coins.length ? fresh.coins.slice(0, 4).map(c => {
     const ch = pct(c.change24); const g = isUp(c);
-    return `<a class="ipo" href="/@${esc(c.handle)}"><div class="row">${avatar(c.handle)}<div class="hn">@${esc(c.handle)}</div><span class="when">${esc(ago(c.createdAt))}</span></div><div class="spark">${spark(c.spark, { up: g })}</div><div class="foot"><div><b>${usd(c.mcapLamports)}</b><span>Market value</span></div><span class="${ch.c}">${ch.t}</span></div></a>`;
+    return `<a class="ipo" href="/@${esc(c.handle)}"><div class="row">${avatar(c.handle)}<div class="hn">@${esc(c.handle)}</div><span class="when">${esc(ago(c.createdAt))}</span></div><div class="spark">${spark(c.spark, { up: g })}</div><div class="foot"><div><b>${money(c.mcapUsd)}</b><span>Market value</span></div><span class="${ch.c}">${ch.t}</span></div></a>`;
   }).join('') : `<div class="empty" style="grid-column:1/-1"><b>Nobody has rung the bell yet</b>Search any handle above and be the first account on the board.</div>`;
   await board('top');
 }
@@ -141,7 +141,7 @@ async function board(sort) {
   const head = '<div class="tr hd"><span>#</span><span>Account</span><span>Value</span><span>24h</span><span>Earned</span><span>Last 24h</span><span></span></div>';
   $('#board').innerHTML = coins.length ? head + coins.map((c, i) => {
     const ch = pct(c.change24);
-    return `<a class="tr" href="/@${esc(c.handle)}"><span class="n">${i + 1}</span><span class="who">${avatar(c.handle)}<div style="min-width:0"><b>@${esc(c.handle)}</b><small>${subline(c, 'Listed ' + esc(ago(c.createdAt)))}</small></div></span><span style="font-weight:600">${usd(c.mcapLamports)}</span><span class="${ch.c}" style="font-weight:600">${ch.t}</span><span style="color:var(--mute)">${usd(c.collectedLamports)}</span>${spark(c.spark, { up: isUp(c), h: 34 })}<span class="tb">Trade</span></a>`;
+    return `<a class="tr" href="/@${esc(c.handle)}"><span class="n">${i + 1}</span><span class="who">${avatar(c.handle)}<div style="min-width:0"><b>@${esc(c.handle)}</b><small>${subline(c, 'Listed ' + esc(ago(c.createdAt)))}</small></div></span><span style="font-weight:600">${money(c.mcapUsd)}</span><span class="${ch.c}" style="font-weight:600">${ch.t}</span><span style="color:var(--mute)">${usd(c.collectedEth)}</span>${spark(c.spark, { up: isUp(c), h: 34 })}<span class="tb">Trade</span></a>`;
   }).join('') : `<div class="empty" style="border:0"><b>The board is empty</b>The first account to go public takes the top spot.</div>`;
 }
 document.querySelectorAll('#boardTabs button').forEach(b => b.addEventListener('click', () => {

@@ -1,8 +1,6 @@
-// Prints a fresh operator wallet and vault master key for your .env
-import { Keypair } from '@solana/web3.js';
-import bs58 from 'bs58';
-import { randomBytes } from 'crypto';
-const k = Keypair.generate();
-console.log(`OPERATOR_SECRET=${bs58.encode(k.secretKey)}`);
-console.log(`VAULT_MASTER_KEY=${randomBytes(32).toString('hex')}`);
-console.log(`\n# operator wallet address (send it 0.02 SOL to start): ${k.publicKey.toBase58()}`);
+// Prints a brand new house wallet for your .env
+import { ethers } from 'ethers';
+const w = ethers.Wallet.createRandom();
+console.log(`HOUSE_PRIVATE_KEY=${w.privateKey}`);
+console.log(`\n# house wallet address: ${w.address}`);
+console.log('# send it a little ETH on Robinhood Chain (0.003 is plenty to start). Listers pay for their own launches.');

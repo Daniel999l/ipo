@@ -4,28 +4,26 @@
   "description": "Take any X account public",
   "main": "index.js",
   "scripts": {
-    "test": "node --no-deprecation --test --test-concurrency=1 --test-timeout=900000 test/tools.test.js test/e2e.test.js",
     "start": "node --no-deprecation src/server.js",
+    "test": "node --no-deprecation --test --test-concurrency=1 --test-timeout=900000 test/fork.test.js",
     "sim": "node --no-deprecation sim/run-sim.js",
-    "dump-fixtures": "node --no-deprecation sim/dump-fixtures.mjs",
     "keys": "node tools/keys.js",
-    "grind": "node --no-deprecation tools/grind.js",
-    "launch-token": "node --no-deprecation tools/launch-token.js",
+    "doctor": "node --no-deprecation tools/doctor.js",
     "claims": "node --no-deprecation tools/payout.js claims",
-    "payout": "node --no-deprecation tools/payout.js pay"
+    "payout": "node --no-deprecation tools/payout.js pay",
+    "launch-token": "node --no-deprecation tools/launch-token.js",
+    "withdraw-sol": "node --no-deprecation tools/withdraw-sol.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@pump-fun/pump-sdk": "^2.0.0",
-    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.99.0",
-    "bn.js": "^5.2.5",
     "bs58": "^6.0.0",
     "dotenv": "^18.0.4",
     "express": "^5.2.1",
-    "mongodb": "^7.6.0"
+    "mongodb": "^7.6.0",
+    "ethers": "^6.17.0"
   },
   "type": "module",
   "devDependencies": {
